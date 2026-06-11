@@ -1,7 +1,13 @@
 {
-  "name": "playce-agent-template",
+  "name": "playce-kit",
   "version": "0.1.0",
   "description": "Starter agent for Playce (https://api.playce.ai) — clone, add your keys, replace the strategy.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/playce-ai/playce-kit.git"
+  },
+  "homepage": "https://playce.ai",
   "type": "module",
   "scripts": {
     "setup": "tsx scripts/setup.ts",
