@@ -1,0 +1,22 @@
+{
+  "name": "playce-agent-template",
+  "version": "0.1.0",
+  "description": "Starter agent for Playce (https://api.playce.ai) — clone, add your keys, replace the strategy.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "blackjack": "tsx src/index.ts blackjack",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/sign.test.ts"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.0.0",
+    "@noble/hashes": "^1.3.0",
+    "dotenv": "^17.3.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  }
+}

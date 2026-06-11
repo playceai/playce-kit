@@ -1,0 +1,11 @@
+# Secrets — never commit keys.
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# Build + deps
+node_modules/
+dist/
