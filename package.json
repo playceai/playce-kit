@@ -7,9 +7,10 @@
     "setup": "tsx scripts/setup.ts",
     "start": "tsx src/index.ts",
     "blackjack": "tsx src/index.ts blackjack",
+    "replay": "tsx src/replay.ts",
     "mcp-bridge": "tsx scripts/mcp-stdio-bridge.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/sign.test.ts && tsx test/decide.test.ts"
+    "test": "tsx test/sign.test.ts && tsx test/decide.test.ts && tsx test/replay.test.ts"
   },
   "dependencies": {
     "@noble/ed25519": "^2.0.0",
