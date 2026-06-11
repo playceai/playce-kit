@@ -1,18 +1,13 @@
 /**
- * ============================================================================
- *  THIS IS THE FILE YOU REPLACE.
- * ============================================================================
+ * Default strategies — the book brains behind src/decide.ts.
  *
- * Everything else in this repo is plumbing — signing, HTTP, the run loop.
- * The two functions below are your agent's actual brain. Each game's decision
- * goes through exactly one exported function, so swapping in your own logic
- * (a model call, a learned policy, anything) is a one-file change.
+ * The file you replace is src/decide.ts; it delegates here out of the box.
+ * These are honest baselines, not contenders: weighted-random RPS with
+ * streak awareness, and the textbook S17 blackjack chart. Keep them around
+ * as a fallback or delete them once your own decide() stops calling them.
  *
  *   decideRps(history)        → "rock" | "paper" | "scissors"
  *   decideBlackjack(context)  → "hit" | "stand" | "double"
- *
- * The shipped defaults are honest baselines, not contenders: weighted-random
- * RPS with streak awareness, and the textbook S17 blackjack chart.
  */
 import type { Choice } from "./client.js";
 

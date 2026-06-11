@@ -10,6 +10,31 @@ import { buildHeaders } from "./sign.js";
 
 export type Choice = "rock" | "paper" | "scissors";
 
+/**
+ * Optional decision-log fields sent with a move (see src/decide.ts).
+ * Server status, honestly: per-move reason/confidence storage is landing on
+ * the gateway now. Until it lands, POST /matches/{id}/choice rejects unknown
+ * JSON fields (400), so submitChoice retries with the bare move — your move
+ * always counts. The blackjack action routes ignore request bodies today, so
+ * the fields are simply dropped there until storage lands.
+ */
+export interface Reasoning {
+  reason?: string; // ≤500 chars (trimmed here)
+  confidence?: number; // 0–1 (clamped here)
+  source?: "llm" | "strategy";
+}
+
+/** Trim/clamp reasoning fields to the documented limits; drop empties. */
+export function sanitizeReasoning(r?: Reasoning): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!r) return out;
+  if (typeof r.reason === "string" && r.reason.length > 0) out.reason = r.reason.slice(0, 500);
+  if (typeof r.confidence === "number" && Number.isFinite(r.confidence))
+    out.confidence = Math.min(1, Math.max(0, r.confidence));
+  if (r.source === "llm" || r.source === "strategy") out.source = r.source;
+  return out;
+}
+
 export interface Creds {
   agentId: string; // Coyns agent id (agt_...), sent as X-Agent-Id
   privateKey: Uint8Array; // 32-byte Ed25519 seed
@@ -182,9 +207,23 @@ export class PlayceClient {
     return this.request("GET", `/v1/playce/matches/${matchId}`);
   }
 
-  /** Lock your choice while the match is ACTIVE (within 50s of start). Signed. */
-  submitChoice(matchId: string, choice: Choice): Promise<ApiResult> {
-    return this.request("POST", `/v1/playce/matches/${matchId}/choice`, { choice }, true);
+  /**
+   * Lock your choice while the match is ACTIVE (within 50s of start). Signed.
+   * Reasoning fields ride along when set; if the gateway doesn't accept them
+   * yet (400 unknown field), the bare choice is resubmitted automatically.
+   */
+  async submitChoice(matchId: string, choice: Choice, reasoning?: Reasoning): Promise<ApiResult> {
+    const extras = sanitizeReasoning(reasoning);
+    const path = `/v1/playce/matches/${matchId}/choice`;
+    const first = await this.request("POST", path, { choice, ...extras }, true);
+    if (
+      Object.keys(extras).length > 0 &&
+      first.status === 400 &&
+      /unknown field/i.test(JSON.stringify(first.data ?? ""))
+    ) {
+      return this.request("POST", path, { choice }, true);
+    }
+    return first;
   }
 
   // ---- blackjack hall (hall_id "casino") ----
@@ -214,9 +253,23 @@ export class PlayceClient {
     return this.request("POST", `/v1/playce/halls/casino/blackjack/tables/${encodeURIComponent(tableId)}/leave`, {}, true);
   }
 
-  /** Act on your turn: phase "player_turns" with active_seat = your seat. Signed. */
-  blackjackAction(matchId: string, action: "hit" | "stand" | "double"): Promise<ApiResult> {
-    return this.request("POST", `/v1/playce/halls/casino/blackjack/matches/${encodeURIComponent(matchId)}/${action}`, {}, true);
+  /**
+   * Act on your turn: phase "player_turns" with active_seat = your seat. Signed.
+   * Reasoning fields are included in the body; these routes ignore bodies
+   * today and will persist the fields once decision-log storage lands.
+   */
+  async blackjackAction(matchId: string, action: "hit" | "stand" | "double", reasoning?: Reasoning): Promise<ApiResult> {
+    const path = `/v1/playce/halls/casino/blackjack/matches/${encodeURIComponent(matchId)}/${action}`;
+    const extras = sanitizeReasoning(reasoning);
+    const first = await this.request("POST", path, { ...extras }, true);
+    if (
+      Object.keys(extras).length > 0 &&
+      first.status === 400 &&
+      /unknown field/i.test(JSON.stringify(first.data ?? ""))
+    ) {
+      return this.request("POST", path, {}, true);
+    }
+    return first;
   }
 
   /** Live hand state (dealer hole card masked until the reveal). Public. */

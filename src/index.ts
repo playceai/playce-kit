@@ -3,12 +3,13 @@
  * blackjack. Flow: join Playce (idempotent) → check balance → play → log.
  *
  * You should not need to edit this file to change how your agent plays —
- * that lives in src/strategy.ts.
+ * that lives in src/decide.ts.
  */
 import "dotenv/config";
-import { PlayceClient, type Choice, type MatchView } from "./client.js";
+import { readFileSync } from "node:fs";
+import { PlayceClient, type Choice, type MatchView, type Reasoning } from "./client.js";
 import { publicKeyFromSeed } from "./sign.js";
-import { decideRps, decideBlackjack, type RpsRound } from "./strategy.js";
+import { decide, type RpsRound } from "./decide.js";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const log = (msg: string) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -20,6 +21,22 @@ function requireEnv(name: string): string {
     process.exit(1);
   }
   return v;
+}
+
+/** Creds written by `pnpm setup` (scripts/setup.ts). */
+interface SavedCreds {
+  agent_name?: string;
+  agent_id?: string;
+  spend_private?: string; // base64 32-byte seed
+  status?: string;
+}
+
+function loadSavedCreds(): SavedCreds {
+  try {
+    return JSON.parse(readFileSync("secrets/coyns_creds.json", "utf8")) as SavedCreds;
+  } catch {
+    return {};
+  }
 }
 
 // ---- rock-paper-scissors ----
@@ -45,12 +62,12 @@ async function findMatch(client: PlayceClient, me: string): Promise<{ matchId: s
 }
 
 /** Poll until ACTIVE, then lock our choice. The server locks at t=50s. */
-async function submitWhenActive(client: PlayceClient, matchId: string, choice: Choice): Promise<boolean> {
+async function submitWhenActive(client: PlayceClient, matchId: string, choice: Choice, reasoning?: Reasoning): Promise<boolean> {
   for (let i = 0; i < 60; i++) {
     const m = await client.getMatch(matchId);
     const state = String(m.data?.state ?? "").toUpperCase();
     if (state === "ACTIVE" || state === "LOCKED") {
-      const r = await client.submitChoice(matchId, choice);
+      const r = await client.submitChoice(matchId, choice, reasoning);
       if (r.status === 200) return true;
       if (r.status === 400 && /already|locked/i.test(JSON.stringify(r.data))) return true;
       log(`submit failed: HTTP ${r.status} ${JSON.stringify(r.data)}`);
@@ -92,9 +109,9 @@ async function playRps(client: PlayceClient, me: string, matches: number): Promi
       break;
     }
     log(`match ${found.matchId} vs ${found.opponent}`);
-    const choice = decideRps(history);
-    if (!(await submitWhenActive(client, found.matchId, choice))) continue;
-    log(`locked ${choice}`);
+    const { move: choice, ...reasoning } = await decide({ game: "rps", history });
+    if (!(await submitWhenActive(client, found.matchId, choice, reasoning))) continue;
+    log(`locked ${choice}${reasoning.reason ? ` — ${reasoning.reason}` : ""}`);
     const round = await waitForSettled(client, found.matchId, me);
     if (!round) {
       log(`match ${found.matchId} never settled — moving on`);
@@ -124,12 +141,13 @@ async function playHand(client: PlayceClient, me: string, matchId: string): Prom
     }
     const seat = view.seats.findIndex((s) => s.agent === me);
     if (seat >= 0 && view.phase === "player_turns" && view.active_seat === seat) {
-      const action = decideBlackjack({
+      const { move: action, ...reasoning } = await decide({
+        game: "blackjack",
         hand: view.seats[seat].hand,
         dealerUp: view.dealer_hand[0] ?? "",
         canDouble: view.seats[seat].hand.length === 2 && !view.seats[seat].doubled,
       });
-      const act = await client.blackjackAction(matchId, action);
+      const act = await client.blackjackAction(matchId, action, reasoning);
       // If a double was illegal after all, fall back to stand.
       if (action === "double" && act.status >= 400) await client.blackjackAction(matchId, "stand");
       log(`hand ${view.seats[seat].hand.join(",")} vs dealer ${view.dealer_hand[0]} → ${action}`);
@@ -215,6 +233,12 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
 // ---- entry ----
 
 async function main() {
+  // .env wins; otherwise fall back to the creds `pnpm setup` saved.
+  const saved = loadSavedCreds();
+  if (!process.env.AGENT_NAME && saved.agent_name) process.env.AGENT_NAME = saved.agent_name;
+  if (!process.env.SPEND_PRIVATE_KEY && saved.spend_private) process.env.SPEND_PRIVATE_KEY = saved.spend_private;
+  if (!process.env.AGENT_ID && saved.agent_id) process.env.AGENT_ID = saved.agent_id;
+
   const agentName = requireEnv("AGENT_NAME").replace(/^@/, "");
   const seed = requireEnv("SPEND_PRIVATE_KEY");
   const baseUrl = process.env.PLAYCE_BASE_URL || "https://api.playce.ai";

@@ -4,10 +4,12 @@
   "description": "Starter agent for Playce (https://api.playce.ai) — clone, add your keys, replace the strategy.",
   "type": "module",
   "scripts": {
+    "setup": "tsx scripts/setup.ts",
     "start": "tsx src/index.ts",
     "blackjack": "tsx src/index.ts blackjack",
+    "mcp-bridge": "tsx scripts/mcp-stdio-bridge.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/sign.test.ts"
+    "test": "tsx test/sign.test.ts && tsx test/decide.test.ts"
   },
   "dependencies": {
     "@noble/ed25519": "^2.0.0",
