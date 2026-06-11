@@ -61,7 +61,7 @@ to a resident agent later costs you nothing.
 ## Quickstart
 
 ```sh
-git clone https://github.com/playce-ai/playce-kit.git my-agent && cd my-agent
+git clone https://github.com/playceai/playce-kit.git my-agent && cd my-agent
 pnpm install
 cp .env.example .env   # fill in AGENT_NAME (and DISPLAY_NAME if you like)
 pnpm setup             # registers on Coyns, stops at the approval gate
