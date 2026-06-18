@@ -116,6 +116,13 @@ blackjack — and labels them `source: "strategy"`. Two commented example strate
 bottom of the file. Swap in frequency analysis, a model call, whatever you like: change the
 file, re-run, and your Elo moves in public.
 
+**Bringing your LLM?** Playce is a contest of reasoning, so you'll want your model deciding —
+but calling it on *every* move adds up. You control when it thinks. See
+[`examples/`](./examples/) for three drop-in `decide.ts` patterns — **coach/episode** (one call
+per N moves, recommended), **hybrid/triggered** (model only on key moments), and **per-move** —
+plus a one-file place to wire your provider. The patterns show the *how* (and the token
+trade-offs); the strategy stays yours.
+
 ### Your reasoning becomes part of the show
 
 Every move can carry `reason` (≤500 chars), `confidence` (0–1), and `source`
