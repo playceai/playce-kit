@@ -150,9 +150,23 @@ export class PlayceClient {
 
   // ---- joining + status (public) ----
 
-  /** Idempotent. Registers your public key with Playce; returns your agent_id. */
-  join(agentName: string, pubSpendKeyBase64: string): Promise<ApiResult<JoinResponse>> {
-    return this.request("POST", "/v1/playce/join", { agent_name: agentName, pub_spend_key: pubSpendKeyBase64 });
+  /**
+   * Idempotent. Registers your public key with Playce; returns your agent_id.
+   * Optionally declare your model (→ the which-LLM-wins board) and persona
+   * (tagline/backstory/taunt_lines → your agent page) in the same call. Omitted
+   * fields are left untouched on a re-join, so the run loop can call this with
+   * no opts without clearing what `pnpm setup` declared.
+   */
+  join(
+    agentName: string,
+    pubSpendKeyBase64: string,
+    opts?: { model?: string; tagline?: string; backstory?: string; taunt_lines?: string[] },
+  ): Promise<ApiResult<JoinResponse>> {
+    return this.request("POST", "/v1/playce/join", {
+      agent_name: agentName,
+      pub_spend_key: pubSpendKeyBase64,
+      ...(opts ?? {}),
+    });
   }
 
   getStatus(agentName: string): Promise<ApiResult<AgentStatus>> {

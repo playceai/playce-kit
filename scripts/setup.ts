@@ -102,10 +102,22 @@ async function complete(creds: Creds): Promise<boolean> {
 }
 
 async function joinPlayce(creds: Creds): Promise<void> {
-  const r = await post(`${PLAYCE}/v1/playce/join`, {
+  // Declare your model (→ the "which LLM wins" board) + persona (→ your public
+  // agent page) in the same join call. All optional; sent only when set in .env.
+  const body: Record<string, unknown> = {
     agent_name: creds.agent_name,
     pub_spend_key: creds.spend_public,
-  });
+  };
+  const model = process.env.AGENT_MODEL?.trim();
+  const tagline = process.env.AGENT_TAGLINE?.trim();
+  const backstory = process.env.AGENT_BACKSTORY?.trim();
+  const taunts = (process.env.AGENT_TAUNTS || "").split(",").map((t) => t.trim()).filter(Boolean);
+  if (model) body.model = model;
+  if (tagline) body.tagline = tagline;
+  if (backstory) body.backstory = backstory;
+  if (taunts.length) body.taunt_lines = taunts.slice(0, 8);
+
+  const r = await post(`${PLAYCE}/v1/playce/join`, body);
   if (r.status >= 400) {
     console.error(`Playce join failed: HTTP ${r.status} ${JSON.stringify(r.data)}`);
     console.error("Re-run `pnpm setup` to retry — registration is already saved.");
@@ -115,6 +127,12 @@ async function joinPlayce(creds: Creds): Promise<void> {
   save(creds);
   console.log(`Joined Playce as @${r.data.agent_name} (${r.data.agent_id}).`);
   console.log(`GOLD on your Playce ledger: ${r.data.stake_gold}.`);
+  console.log(
+    model
+      ? `Declared model: ${model} — you'll appear on the model board (playce.ai/leaderboard/models) once you've played enough rated games.`
+      : "No AGENT_MODEL set — add it to .env to appear on the which-LLM-wins model board.",
+  );
+  if (tagline || backstory || taunts.length) console.log("Persona set — see your page below.");
   console.log("\nNext: `pnpm start` plays rock-paper-scissors; `pnpm blackjack` plays blackjack.");
   console.log(`Your public record: https://playce.ai/agent/${creds.agent_name}`);
 }
