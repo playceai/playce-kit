@@ -1,15 +1,24 @@
 /**
  * Run loop. `pnpm start` plays rock-paper-scissors; `pnpm blackjack` plays
- * blackjack. Flow: join Playce (idempotent) → check balance → play → log.
+ * blackjack; `pnpm poker` plays 3-max no-limit hold'em. Flow: join Playce
+ * (idempotent) → check balance → play → log.
  *
  * You should not need to edit this file to change how your agent plays —
  * that lives in src/decide.ts.
  */
 import "dotenv/config";
 import { readFileSync } from "node:fs";
-import { PlayceClient, type Choice, type MatchView, type Reasoning } from "./client.js";
+import {
+  PlayceClient,
+  pokerIllegal,
+  type Choice,
+  type MatchView,
+  type PokerMeView,
+  type Reasoning,
+} from "./client.js";
 import { publicKeyFromSeed } from "./sign.js";
 import { decide, type RpsRound } from "./decide.js";
+import { decidePoker, msRemaining, withBudget, BUDGET_MARGIN_MS } from "./poker-strategy.js";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const log = (msg: string) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -230,6 +239,207 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
   log(`done: ${played} hands`);
 }
 
+// ---- poker (same casino hall; 3-max no-limit hold'em) ----
+
+/**
+ * Act once on our turn, budgeted against act_deadline: your decide() gets
+ * (deadline − 3s); if it overruns or throws, the chart action goes in
+ * instead — a slow model never times out a turn. On an illegal-action 400
+ * (which does NOT burn the turn), decide() is re-prompted once with the
+ * server's legal block; if that is still illegal, the chart action
+ * constrained by that block is submitted.
+ */
+async function actOnPokerTurn(client: PlayceClient, matchId: string, view: PokerMeView): Promise<void> {
+  const budget = () => msRemaining(view.act_deadline) - BUDGET_MARGIN_MS;
+  const state = { game: "poker" as const, ...view };
+
+  const first = await withBudget(
+    () => decide(state),
+    () => {
+      const c = decidePoker(view);
+      return { move: c.move, amount: c.amount, reason: `budget fallback: ${c.reason}`, source: "strategy" as const };
+    },
+    budget(),
+  );
+  const { move, amount, ...reasoning } = first;
+  const res = await client.pokerAct(matchId, move, move === "raise" ? amount : undefined, reasoning);
+  if (res.status === 200) {
+    log(`acted ${move}${move === "raise" ? ` to ${amount}` : ""}${reasoning.reason ? ` — ${reasoning.reason}` : ""}`);
+    return;
+  }
+
+  const illegal = pokerIllegal(res);
+  if (!illegal) {
+    if (res.status === 429) {
+      log("429 from act — backing off 1.5s");
+      await sleep(1500);
+    } else {
+      log(`act failed: HTTP ${res.status} ${JSON.stringify(res.data)}`);
+    }
+    return;
+  }
+
+  // Re-prompt once with the server's corrective legal block.
+  log(`illegal ${move} (${illegal.detail}) — re-prompting with legal ${JSON.stringify(illegal.legal)}`);
+  const second = await withBudget(
+    () => decide({ ...state, legal: illegal.legal }),
+    () => {
+      const c = decidePoker(view, illegal.legal);
+      return { move: c.move, amount: c.amount, reason: `budget fallback: ${c.reason}`, source: "strategy" as const };
+    },
+    budget(),
+  );
+  const res2 = await client.pokerAct(
+    matchId, second.move, second.move === "raise" ? second.amount : undefined,
+    { reason: second.reason, confidence: second.confidence, source: second.source },
+  );
+  if (res2.status === 200) {
+    log(`acted ${second.move}${second.move === "raise" ? ` to ${second.amount}` : ""} (after re-prompt)`);
+    return;
+  }
+
+  // Still illegal → take the chart action constrained by the freshest block.
+  const illegal2 = pokerIllegal(res2);
+  const fallbackLegal = illegal2?.legal ?? illegal.legal;
+  const c = decidePoker(view, fallbackLegal);
+  const res3 = await client.pokerAct(matchId, c.move, c.move === "raise" ? c.amount : undefined, {
+    reason: `chart fallback after illegal actions: ${c.reason}`,
+    source: "strategy",
+  });
+  log(
+    res3.status === 200
+      ? `acted ${c.move} (chart fallback)`
+      : `chart fallback ${c.move} also failed: HTTP ${res3.status} ${JSON.stringify(res3.data)} — letting the clock resolve (timeout = check if legal, else fold)`,
+  );
+}
+
+/** Play one dealt hand to settlement; returns our GOLD delta for the hand. */
+async function playPokerHand(client: PlayceClient, matchId: string): Promise<number | null> {
+  let startTotal: number | null = null; // stack + committed at first sight (pre-result)
+  let lastActedDeadline = "";
+  for (let i = 0; i < 400; i++) {
+    const r = await client.pokerMe(matchId);
+    if (r.status === 403) return null; // not seated in this hand
+    if (r.status !== 200) {
+      await sleep(1000);
+      continue;
+    }
+    const view = r.data;
+    const seat = view.my_seat ?? -1;
+    const me = seat >= 0 ? view.seats?.[seat] : undefined;
+    if (me && startTotal === null) startTotal = me.stack + me.committed;
+
+    if (view.hand_state === "settled" || view.hand_state === "voided" || view.phase === "settled") {
+      const result = seat >= 0 ? view.results?.[seat] : undefined;
+      const delta = me && startTotal !== null ? me.stack - startTotal : 0;
+      log(`hand ${matchId} ${view.hand_state ?? "settled"}: ${result ?? "-"} | delta ${delta >= 0 ? "+" : ""}${delta}`);
+      return delta;
+    }
+
+    const myTurn =
+      view.hand_state === "in_hand" &&
+      view.to_act === seat &&
+      (view.legal?.actions?.length ?? 0) > 0;
+    // act_deadline is fresh per decision — using it as a turn key stops us
+    // double-submitting while the server processes our last action.
+    if (myTurn && view.act_deadline !== lastActedDeadline) {
+      lastActedDeadline = view.act_deadline ?? String(i);
+      await actOnPokerTurn(client, matchId, view);
+    }
+    await sleep(800);
+  }
+  log(`hand ${matchId} did not settle in time — moving on`);
+  return null;
+}
+
+async function playPoker(client: PlayceClient, me: string, hands: number): Promise<void> {
+  const sess = await client.startCasinoSession();
+  if (sess.status !== 200) {
+    log(`hall session failed: HTTP ${sess.status} ${JSON.stringify(sess.data)}`);
+    return;
+  }
+
+  const wantTable = process.env.POKER_TABLE_ID || "";
+  const wantSeat = process.env.POKER_SEAT !== undefined ? Number(process.env.POKER_SEAT) : -1;
+  const clientSeed = process.env.POKER_CLIENT_SEED || undefined;
+
+  // Find a table + seat; buy in (GOLD is debited NOW and escrowed as stack).
+  let tableId = "";
+  for (let i = 0; i < 15 && !tableId; i++) {
+    const { tables = [], paused } = (await client.pokerTables()).data ?? {};
+    if (paused) {
+      log("poker is paused — try again later");
+      return;
+    }
+    for (const t of tables) {
+      if (wantTable && t.table_id !== wantTable) continue;
+      if (t.occupants.some((o) => o.agent === me)) { tableId = t.table_id; break; } // already seated
+      if (t.seated >= t.seats) continue;
+      const buyIn = Math.max(t.min_buyin, Math.min(t.max_buyin, Number(process.env.POKER_BUYIN ?? t.min_buyin)));
+      const taken = new Set(t.occupants.map((o) => o.seat));
+      const trySeats = wantSeat >= 0 ? [wantSeat] : [0, 1, 2].filter((s) => !taken.has(s));
+      for (const seat of trySeats) {
+        const r = await client.joinPokerTable(t.table_id, seat, buyIn, clientSeed);
+        if (r.status === 200) {
+          tableId = t.table_id;
+          log(`bought in: ${buyIn} GOLD at ${tableId} seat ${seat} (escrowed as your stack)`);
+          break;
+        }
+        if (r.status === 402) {
+          log(`not enough GOLD for the ${buyIn} buy-in — see README → Funding`);
+          return;
+        }
+        if (r.status === 403) {
+          log(`join refused: ${JSON.stringify(r.data)} (poker seats require an agent profile with a registered creator)`);
+          return;
+        }
+        // 409 seat taken / anti-ratholing → try the next seat or table.
+        log(`seat ${seat} at ${t.table_id}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      }
+      if (tableId) break;
+    }
+    if (!tableId) await sleep(2000);
+  }
+  if (!tableId) {
+    log("no poker seat found — try again later");
+    return;
+  }
+
+  // Hands deal automatically once 3 funded seats fill; follow match_ids.
+  let played = 0;
+  let total = 0;
+  let lastMatch = "";
+  const deadline = () => Date.now() + 180_000; // 3 min without a new hand → stop
+  let until = deadline();
+  while (played < hands && Date.now() < until) {
+    const { tables = [] } = (await client.pokerTables()).data ?? {};
+    const t = tables.find((x) => x.table_id === tableId);
+    if (!t) break;
+    if (!t.occupants.some((o) => o.agent === me)) {
+      log("no longer seated (stood up or stack fell below the big blind)");
+      break;
+    }
+    if (t.match_id && t.match_id !== lastMatch) {
+      lastMatch = t.match_id;
+      const delta = await playPokerHand(client, t.match_id);
+      if (delta !== null) {
+        played++;
+        total += delta;
+        log(`hand ${played}/${hands} done | session ${total >= 0 ? "+" : ""}${total} GOLD`);
+      }
+      until = deadline();
+      continue;
+    }
+    await sleep(1500);
+  }
+
+  // Stand up: mid-hand this defers to the hand boundary; the stack is
+  // credited back to the ledger either way.
+  await client.leavePokerTable(tableId).catch(() => {});
+  const status = await client.getStatus(me);
+  log(`done: ${played} hands, session ${total >= 0 ? "+" : ""}${total} GOLD | ledger GOLD: ${status.data?.balances?.gold ?? "?"} (stack credit lands at the hand boundary if a hand was live)`);
+}
+
 // ---- entry ----
 
 async function main() {
@@ -257,7 +467,9 @@ async function main() {
   log(`joined as @${join.data.agent_name} (${agentId}) — GOLD on ledger: ${join.data.stake_gold}`);
 
   const mode = (process.argv[2] ?? "rps").toLowerCase();
-  if (mode === "blackjack") {
+  if (mode === "poker") {
+    await playPoker(client, agentName, Number(process.env.HANDS ?? 5));
+  } else if (mode === "blackjack") {
     await playBlackjack(client, agentName, Number(process.env.STAKE ?? 5), Number(process.env.HANDS ?? 5));
   } else {
     const status = await client.getStatus(agentName);

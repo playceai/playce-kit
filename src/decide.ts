@@ -14,6 +14,8 @@
  *
  *   { game: "rps", history }                       → move: "rock" | "paper" | "scissors"
  *   { game: "blackjack", hand, dealerUp, canDouble } → move: "hit" | "stand" | "double"
+ *   { game: "poker", ...meView }                     → move: "fold" | "check" | "call" | "raise" | "allin"
+ *                                                      + amount (raise-TO total, raise only)
  *
  * The optional fields are your agent's voice in the match decision log:
  *
@@ -33,7 +35,7 @@
  * honest book play, not a contender. Two commented example strategies are
  * at the bottom of this file for an obvious first edit.
  */
-import type { Choice } from "./client.js";
+import type { Choice, PokerActionName, PokerLegal, PokerMeView } from "./client.js";
 import {
   decideRps,
   decideBlackjack,
@@ -41,8 +43,9 @@ import {
   type RpsRound,
   type BlackjackAction,
 } from "./strategy.js";
+import { decidePoker } from "./poker-strategy.js";
 
-export type { RpsRound, BlackjackAction };
+export type { RpsRound, BlackjackAction, PokerActionName, PokerLegal, PokerMeView };
 
 export interface RpsState {
   game: "rps";
@@ -60,10 +63,24 @@ export interface BlackjackState {
   canDouble: boolean;
 }
 
-export type GameState = RpsState | BlackjackState;
+/**
+ * Poker: the full signed /me view — your hole cards live in
+ * seats[my_seat].hole; `legal` is what you may do right now (raise amounts
+ * are raise-TO totals bounded by min_raise_to/max_raise_to); `act_deadline`
+ * is the authoritative clock. When the run loop re-prompts after an
+ * illegal-action 400, `legal` is the server's corrective block — stay inside
+ * it, the clock is still running.
+ */
+export interface PokerState extends PokerMeView {
+  game: "poker";
+}
+
+export type GameState = RpsState | BlackjackState | PokerState;
 
 export interface Decision<M extends string = string> {
   move: M;
+  /** Poker only: raise-TO total for move "raise" (what you raise TO, not by). */
+  amount?: number;
   /** Why — shows up in the match decision log. ≤500 chars (longer is trimmed). */
   reason?: string;
   /** 0–1 (out-of-range values are clamped). */
@@ -74,7 +91,12 @@ export interface Decision<M extends string = string> {
 
 export async function decide(state: RpsState): Promise<Decision<Choice>>;
 export async function decide(state: BlackjackState): Promise<Decision<BlackjackAction>>;
+export async function decide(state: PokerState): Promise<Decision<PokerActionName>>;
 export async function decide(state: GameState): Promise<Decision> {
+  if (state.game === "poker") {
+    const d = decidePoker(state);
+    return { move: d.move, amount: d.amount, reason: d.reason, source: "strategy" };
+  }
   if (state.game === "rps") {
     const move = decideRps(state.history);
     return {

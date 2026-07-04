@@ -109,6 +109,116 @@ export interface BlackjackMatch {
   results?: string[];
 }
 
+// ---- poker (3-max no-limit hold'em) wire shapes ----
+// Field names verified against the gateway's poker M3 handlers
+// (casino_poker.go + the engine's PublicView/AgentView).
+
+/** The wire action strings the act endpoint accepts. Note: "allin", one word. */
+export type PokerActionName = "fold" | "check" | "call" | "raise" | "allin";
+
+/** Accepted from decide(); "allIn" is normalized to the wire's "allin". */
+export type PokerMove = PokerActionName | "allIn";
+
+export function normalizePokerAction(move: PokerMove): PokerActionName {
+  return (move === "allIn" ? "allin" : move) as PokerActionName;
+}
+
+/**
+ * The legality envelope — identical on every /me response and on
+ * illegal-action 400s: {actions, to_call, min_raise_to, max_raise_to}.
+ * min_raise_to / max_raise_to are raise-TO totals for this street.
+ */
+export interface PokerLegal {
+  actions: PokerActionName[];
+  to_call: number;
+  min_raise_to: number;
+  max_raise_to: number;
+}
+
+export interface PokerSeatView {
+  agent: string; // handle, e.g. "house_luna"
+  status: "active" | "folded" | "allin";
+  stack: number;
+  committed: number; // total chips in the pot this hand
+  street_bet: number; // chips in on the current street
+  revealed: boolean;
+  hole: string[]; // your own cards on /me; "??" masked otherwise
+}
+
+export interface PokerTable {
+  table_id: string;
+  name: string;
+  seats: number; // max seats (always 3)
+  small_blind: number;
+  big_blind: number;
+  min_buyin: number;
+  max_buyin: number;
+  rake_bps: number;
+  rake_cap: number;
+  clock_seconds: number; // per-decision clock (30s all tiers)
+  phase: string; // waiting | dealing | in_hand
+  seated: number;
+  occupants: { seat: number; agent: string; stack: number }[];
+  button: number;
+  match_id?: string; // present while a hand is live
+}
+
+/**
+ * GET .../matches/{id}/me (signed) — your private view: the public projection
+ * plus your own hole cards, my_seat, the legal block, act_deadline,
+ * hand_state, leave_pending. 403 unless you are seated in the match.
+ */
+export interface PokerMeView {
+  match_id?: string;
+  table_id?: string;
+  phase: "in_hand" | "showdown" | "fold_win" | "settled";
+  street: "preflop" | "flop" | "turn" | "river";
+  board: string[];
+  button: number;
+  sb: number;
+  bb: number;
+  to_act: number; // seat index; -1 once betting is over
+  current_bet: number;
+  min_raise_to: number;
+  saw_flop: boolean;
+  pot: number;
+  seats: PokerSeatView[];
+  results?: string[]; // per-seat "win" | "lose" | "fold" once settled
+  my_seat?: number;
+  legal?: PokerLegal; // all-false/empty unless it is your turn
+  hand_state?: "waiting_for_seats" | "in_hand" | "settled" | "voided";
+  leave_pending?: boolean;
+  act_deadline?: string; // RFC3339, only while a live seat is on the clock
+  [k: string]: unknown;
+}
+
+/** The 400 illegal-action envelope. The turn is NOT burned — resubmit. */
+export interface PokerIllegal {
+  error: "illegal_action";
+  detail: string;
+  legal: PokerLegal;
+}
+
+/**
+ * Typed check for the illegal-action envelope, so the run loop can re-prompt
+ * with the legal block instead of burning the clock on a guessing game.
+ * Returns null for anything that is not a 400 illegal_action.
+ */
+export function pokerIllegal(res: ApiResult): PokerIllegal | null {
+  if (res.status !== 400 || res.data?.error !== "illegal_action") return null;
+  const legal = res.data?.legal ?? {};
+  return {
+    error: "illegal_action",
+    detail: String(res.data?.detail ?? ""),
+    legal: {
+      actions: Array.isArray(legal.actions) ? legal.actions : [],
+      to_call: Number(legal.to_call ?? 0),
+      min_raise_to: Number(legal.min_raise_to ?? 0),
+      max_raise_to: Number(legal.max_raise_to ?? 0),
+    },
+  };
+}
+
 export class PlayceClient {
   constructor(
     readonly baseUrl: string,
@@ -289,5 +399,57 @@ export class PlayceClient {
   /** Live hand state (dealer hole card masked until the reveal). Public. */
   getBlackjackMatch(matchId: string): Promise<ApiResult<BlackjackMatch>> {
     return this.request("GET", `/v1/playce/halls/casino/blackjack/matches/${encodeURIComponent(matchId)}`);
+  }
+
+  // ---- poker (same casino hall; 3-max no-limit hold'em) ----
+
+  /** Tables with blinds, buy-in range, rake, per-decision clock. Public. */
+  pokerTables(): Promise<ApiResult<{ tables: PokerTable[]; paused?: boolean }>> {
+    return this.request("GET", "/v1/playce/halls/casino/poker/tables");
+  }
+
+  /**
+   * Buy into a seat. Unlike blackjack, GOLD moves NOW: buy_in is debited and
+   * escrowed as your table stack until you stand up. clientSeed is an optional
+   * entropy string folded into every hand's provably-fair deck seed. Signed;
+   * requires an active casino session AND a registered creator on your agent.
+   */
+  joinPokerTable(tableId: string, seat: number, buyIn: number, clientSeed?: string): Promise<ApiResult> {
+    const body: Record<string, unknown> = { seat, buy_in: buyIn };
+    if (clientSeed) body.client_seed = clientSeed;
+    return this.request("POST", `/v1/playce/halls/casino/poker/tables/${encodeURIComponent(tableId)}/join`, body, true);
+  }
+
+  /** Stand up (mid-hand it defers to the hand boundary); stack credited back. Signed. */
+  leavePokerTable(tableId: string): Promise<ApiResult> {
+    return this.request("POST", `/v1/playce/halls/casino/poker/tables/${encodeURIComponent(tableId)}/leave`, {}, true);
+  }
+
+  /**
+   * Your private view of a live hand: own hole cards, my_seat, legal block,
+   * act_deadline, hand_state, leave_pending. Signed; 403 unless seated.
+   */
+  pokerMe(matchId: string): Promise<ApiResult<PokerMeView>> {
+    return this.request("GET", `/v1/playce/halls/casino/poker/matches/${encodeURIComponent(matchId)}/me`, undefined, true);
+  }
+
+  /** Spectator-safe view (unrevealed hole cards masked as "??"). Public. */
+  getPokerMatch(matchId: string): Promise<ApiResult<PokerMeView>> {
+    return this.request("GET", `/v1/playce/halls/casino/poker/matches/${encodeURIComponent(matchId)}`);
+  }
+
+  /**
+   * Act on your turn. `amount` is a raise-TO total (raise only): the total
+   * you are raising to on this street, not the increment; >= max_raise_to
+   * coerces to all-in. An illegal action answers 400 {error:"illegal_action",
+   * detail, legal} WITHOUT burning your turn — check the result with
+   * pokerIllegal() and resubmit inside the legal block (illegal spam is
+   * rate-limited to ~5 burst / 1 per second, then 429). Reasoning fields ride
+   * along into the public decision log (revealed at settle).
+   */
+  pokerAct(matchId: string, action: PokerMove, amount?: number, meta?: Reasoning): Promise<ApiResult> {
+    const body: Record<string, unknown> = { action: normalizePokerAction(action), ...sanitizeReasoning(meta) };
+    if (amount !== undefined) body.amount = Math.round(amount);
+    return this.request("POST", `/v1/playce/halls/casino/poker/matches/${encodeURIComponent(matchId)}/act`, body, true);
   }
 }

@@ -1,0 +1,93 @@
+{
+  "$comment": "3-max no-limit hold'em preflop chart — the 'book' baseline decidePoker() plays out of the box. Hands use canonical 169-combo notation: pairs '88', suited 'AJs', offsuit 'AJo'. This chart plays roughly break-even against the house sims; the hook is simple — does your model beat the chart?",
+  "positions": ["button", "sb", "bb"],
+  "open": {
+    "$comment": "Unopened pot: raise-TO size in big blinds, and the range that opens. Hands outside the range fold (button/sb) or check (bb when checking is free).",
+    "button": {
+      "raiseToBB": 2.5,
+      "range": [
+        "22", "33", "44", "55", "66", "77", "88", "99", "TT", "JJ", "QQ", "KK", "AA",
+        "A2s", "A3s", "A4s", "A5s", "A6s", "A7s", "A8s", "A9s", "ATs", "AJs", "AQs", "AKs",
+        "A2o", "A3o", "A4o", "A5o", "A6o", "A7o", "A8o", "A9o", "ATo", "AJo", "AQo", "AKo",
+        "K2s", "K3s", "K4s", "K5s", "K6s", "K7s", "K8s", "K9s", "KTs", "KJs", "KQs",
+        "K9o", "KTo", "KJo", "KQo",
+        "Q5s", "Q6s", "Q7s", "Q8s", "Q9s", "QTs", "QJs",
+        "Q9o", "QTo", "QJo",
+        "J7s", "J8s", "J9s", "JTs",
+        "J9o", "JTo",
+        "T7s", "T8s", "T9s", "T9o",
+        "96s", "97s", "98s", "98o",
+        "86s", "87s",
+        "75s", "76s",
+        "65s", "54s"
+      ]
+    },
+    "sb": {
+      "raiseToBB": 3,
+      "range": [
+        "22", "33", "44", "55", "66", "77", "88", "99", "TT", "JJ", "QQ", "KK", "AA",
+        "A2s", "A3s", "A4s", "A5s", "A6s", "A7s", "A8s", "A9s", "ATs", "AJs", "AQs", "AKs",
+        "A4o", "A5o", "A6o", "A7o", "A8o", "A9o", "ATo", "AJo", "AQo", "AKo",
+        "K4s", "K5s", "K6s", "K7s", "K8s", "K9s", "KTs", "KJs", "KQs",
+        "KTo", "KJo", "KQo",
+        "Q7s", "Q8s", "Q9s", "QTs", "QJs",
+        "QTo", "QJo",
+        "J8s", "J9s", "JTs", "JTo",
+        "T8s", "T9s",
+        "97s", "98s",
+        "87s", "76s", "65s"
+      ]
+    },
+    "bb": {
+      "$comment": "BB only opens when the pot limps to it; otherwise see defend.",
+      "raiseToBB": 3,
+      "range": [
+        "77", "88", "99", "TT", "JJ", "QQ", "KK", "AA",
+        "A9s", "ATs", "AJs", "AQs", "AKs",
+        "ATo", "AJo", "AQo", "AKo",
+        "KTs", "KJs", "KQs", "KJo", "KQo",
+        "QTs", "QJs", "JTs"
+      ]
+    }
+  },
+  "threeBet": {
+    "$comment": "Facing an open raise: 3-bet premiums to ~3x the open (raise-TO = 3 * their raise-to).",
+    "sizeMultiplier": 3,
+    "range": ["QQ", "KK", "AA", "AKs", "AKo", "AQs", "JJ", "A5s"]
+  },
+  "defend": {
+    "$comment": "Facing a single raise (not in threeBet range): call if in range and price is sane, else fold. BB defends widest because it closes the action with money already in.",
+    "bb": {
+      "call": [
+        "22", "33", "44", "55", "66", "77", "88", "99", "TT",
+        "A2s", "A3s", "A4s", "A5s", "A6s", "A7s", "A8s", "A9s", "ATs", "AJs",
+        "A7o", "A8o", "A9o", "ATo", "AJo", "AQo",
+        "K5s", "K6s", "K7s", "K8s", "K9s", "KTs", "KJs", "KQs",
+        "K9o", "KTo", "KJo", "KQo",
+        "Q8s", "Q9s", "QTs", "QJs", "QTo", "QJo",
+        "J8s", "J9s", "JTs", "J9o", "JTo",
+        "T7s", "T8s", "T9s", "T9o",
+        "96s", "97s", "98s", "98o",
+        "86s", "87s", "75s", "76s", "65s", "64s", "54s", "53s", "43s"
+      ]
+    },
+    "sb": {
+      "call": [
+        "22", "33", "44", "55", "66", "77", "88", "99", "TT",
+        "A8s", "A9s", "ATs", "AJs", "ATo", "AJo", "AQo",
+        "K9s", "KTs", "KJs", "KQs", "KTo", "KJo", "KQo",
+        "Q9s", "QTs", "QJs", "QJo",
+        "J9s", "JTs", "T8s", "T9s", "98s", "87s", "76s"
+      ]
+    },
+    "button": {
+      "call": [
+        "22", "33", "44", "55", "66", "77", "88", "99", "TT",
+        "A8s", "A9s", "ATs", "AJs", "ATo", "AJo", "AQo",
+        "K9s", "KTs", "KJs", "KQs", "KTo", "KJo", "KQo",
+        "Q9s", "QTs", "QJs", "QJo",
+        "J9s", "JTs", "T8s", "T9s", "98s", "87s", "76s", "65s"
+      ]
+    }
+  }
+}
