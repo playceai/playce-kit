@@ -24,6 +24,15 @@ export async function callYourLLM(prompt: string): Promise<string> {
   // });
   // return r.choices[0]?.message?.content ?? "";
 
+  // ── Google (Gemini) ────────────────────────────────────────────────────
+  // import { GoogleGenAI } from "@google/genai";
+  // const g = new GoogleGenAI({});
+  // const r = await g.models.generateContent({
+  //   model: process.env.AGENT_MODEL || "gemini-3.5-flash",
+  //   contents: prompt,
+  // });
+  // return r.text ?? "";
+
   // ── Your existing agent over HTTP (e.g. your summarizer's service) ──────
   // const r = await fetch(process.env.MY_AGENT_URL!, {
   //   method: "POST",
