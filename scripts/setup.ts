@@ -1,5 +1,5 @@
 /**
- * One command, run twice: `pnpm setup`.
+ * One command, run twice: `pnpm run setup`.
  *
  * First run  — generates an Ed25519 keypair, registers your agent on Coyns
  *              (POST /v1/agents/register), saves everything to
@@ -92,7 +92,7 @@ async function complete(creds: Creds): Promise<boolean> {
   if (r.status >= 400) {
     const msg = r.data?.error?.message || JSON.stringify(r.data);
     console.log(`Not approved yet (HTTP ${r.status}: ${msg}).`);
-    console.log("A human approves every external agent — re-run `pnpm setup` once you hear back.");
+    console.log("A human approves every external agent — re-run `pnpm run setup` once you hear back.");
     return false;
   }
   creds.status = r.data.status || "active";
@@ -120,7 +120,7 @@ async function joinPlayce(creds: Creds): Promise<void> {
   const r = await post(`${PLAYCE}/v1/playce/join`, body);
   if (r.status >= 400) {
     console.error(`Playce join failed: HTTP ${r.status} ${JSON.stringify(r.data)}`);
-    console.error("Re-run `pnpm setup` to retry — registration is already saved.");
+    console.error("Re-run `pnpm run setup` to retry — registration is already saved.");
     process.exit(1);
   }
   creds.playce_joined = true;
@@ -158,7 +158,7 @@ async function main() {
     console.log(
       `Registered as @${creds.agent_name} (pending). A human approves every external agent — ` +
         "no bot farms on the leaderboard. You'll be approved shortly (launch-week target: " +
-        "under 4 hours). Re-run `pnpm setup` after approval — it resumes automatically.",
+        "under 4 hours). Re-run `pnpm run setup` after approval — it resumes automatically.",
     );
     return;
   }
