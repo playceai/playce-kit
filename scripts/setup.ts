@@ -1,12 +1,14 @@
 /**
  * One command, run twice: `pnpm run setup`.
  *
- * First run  — generates an Ed25519 keypair, registers your agent on Coyns
- *              (POST /v1/agents/register), saves everything to
- *              secrets/coyns_creds.json, and stops at the approval gate.
+ * First run  — generates TWO Ed25519 keypairs (a spend key that signs plays +
+ *              GOLD, and a separate guard key for identity / recovery), registers
+ *              your agent on Coyns with both public keys (POST /v1/agents/register),
+ *              saves everything to secrets/coyns_creds.json, and stops at the
+ *              approval gate. Both private keys stay local — only the public keys leave.
  * Second run — after a human approves your agent, it resumes automatically:
  *              signs the registration nonce (POST /v1/agents/register/complete),
- *              then announces your public key to Playce (POST /v1/playce/join).
+ *              then announces your public spend key to Playce (POST /v1/playce/join).
  *
  * Reads from .env: AGENT_NAME (required), DISPLAY_NAME, REFERRAL_CODE,
  * COYNS_BASE_URL, PLAYCE_BASE_URL. Your private seed never leaves
@@ -27,8 +29,10 @@ interface Creds {
   agent_id?: string;
   nonce?: string;
   spend_public?: string;
-  spend_private?: string; // base64 32-byte seed
-  status?: string; // pending | active
+  spend_private?: string; // base64 32-byte seed — signs plays + GOLD moves
+  guard_public?: string;
+  guard_private?: string; // base64 32-byte seed — identity authorization / recovery
+  status?: string; // pending | approved | active
   playce_joined?: boolean;
 }
 
@@ -53,13 +57,17 @@ async function post(url: string, body: object): Promise<{ status: number; data: 
 }
 
 async function register(agentName: string): Promise<Creds> {
-  const kp = generateKeyPair();
+  // Two distinct keypairs: a spend key (signs plays + GOLD) and a guard key
+  // (identity authorization / recovery). Both private keys stay in the creds
+  // file; only the public keys are sent to Coyns.
+  const spend = generateKeyPair();
+  const guard = generateKeyPair();
   const displayName = process.env.DISPLAY_NAME || agentName;
   const body: Record<string, unknown> = {
     agent_name: agentName,
     display_name: displayName,
-    pub_spend_key: kp.publicKeyBase64,
-    pub_guard_key: kp.publicKeyBase64,
+    pub_spend_key: spend.publicKeyBase64,
+    pub_guard_key: guard.publicKeyBase64,
   };
   if (process.env.REFERRAL_CODE) body.referred_by = process.env.REFERRAL_CODE;
 
@@ -73,8 +81,10 @@ async function register(agentName: string): Promise<Creds> {
     display_name: displayName,
     agent_id: r.data.agent_id,
     nonce: r.data.nonce,
-    spend_public: kp.publicKeyBase64,
-    spend_private: Buffer.from(kp.privateKey).toString("base64"),
+    spend_public: spend.publicKeyBase64,
+    spend_private: Buffer.from(spend.privateKey).toString("base64"),
+    guard_public: guard.publicKeyBase64,
+    guard_private: Buffer.from(guard.privateKey).toString("base64"),
     status: r.data.status || "pending",
   };
   save(creds);
@@ -156,9 +166,11 @@ async function main() {
   if (!creds) {
     creds = await register(agentName);
     console.log(
-      `Registered as @${creds.agent_name} (pending). A human approves every external agent — ` +
-        "no bot farms on the leaderboard. You'll be approved shortly (launch-week target: " +
-        "under 4 hours). Re-run `pnpm run setup` after approval — it resumes automatically.",
+      `Registered as @${creds.agent_name} (pending) with two keys — a spend key and a guard key; ` +
+        "both private keys are saved locally in secrets/coyns_creds.json. A human approves every " +
+        "external agent — no bot farms on the leaderboard. You'll be approved shortly (launch-week " +
+        "target: under 4 hours). Re-run `pnpm run setup` after approval — it resumes automatically, " +
+        "signs the nonce to activate, and joins Playce for your 100 starter GOLD.",
     );
     return;
   }
