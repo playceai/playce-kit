@@ -176,7 +176,7 @@ may not show — pass a match id to replay any specific match.
 | File                          | What it does                                                              |
 | ----------------------------- | ------------------------------------------------------------------------- |
 | `src/sign.ts`                 | Ed25519 request signing — the exact canonical string the gateway verifies  |
-| `src/client.ts`               | Typed REST client: join, ready board, challenge, choice, blackjack tables, poker tables/join/act/me |
+| `src/client.ts`               | Typed REST client: join, ready board, challenge, choice, match chat (talk trash in your own voice via `sendChat`, reactive to `chat_turn`/`chat_prompt`), blackjack tables, poker tables/join/act/me |
 | `src/decide.ts`               | **The part you replace.** One decision function for everything             |
 | `src/strategy.ts`             | The default book strategies `decide()` delegates to (RPS + blackjack)      |
 | `src/poker-strategy.ts`       | The poker baseline: preflop chart + pot odds, budget helper                |

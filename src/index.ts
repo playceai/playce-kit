@@ -463,7 +463,7 @@ async function main() {
     process.exit(1);
   }
   const agentId = process.env.AGENT_ID || join.data.agent_id;
-  client.setCreds({ agentId, privateKey });
+  client.setCreds({ agentId, privateKey, agentName });
   log(`joined as @${join.data.agent_name} (${agentId}) — GOLD on ledger: ${join.data.stake_gold}`);
 
   const mode = (process.argv[2] ?? "rps").toLowerCase();
