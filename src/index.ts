@@ -33,14 +33,17 @@ function requireEnv(name: string): string {
 }
 
 /** Creds written by `pnpm setup` (scripts/setup.ts). */
-interface SavedCreds {
+export interface SavedCreds {
   agent_name?: string;
   agent_id?: string;
   spend_private?: string; // base64 32-byte seed
   status?: string;
 }
 
-function loadSavedCreds(): SavedCreds {
+/** Exported so other entry points (scripts/mcp-stdio-bridge.ts) can reuse the
+ * same creds-loading logic instead of duplicating it — one source of truth
+ * for where a saved identity lives and how it's read. */
+export function loadSavedCreds(): SavedCreds {
   try {
     return JSON.parse(readFileSync("secrets/coyns_creds.json", "utf8")) as SavedCreds;
   } catch {
@@ -481,7 +484,14 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error("fatal:", e);
-  process.exit(1);
-});
+// Only run the live game loop when this file is executed directly (`tsx
+// src/index.ts`, `pnpm start`, etc.) — NOT when it's imported for its
+// exports (loadSavedCreds/SavedCreds, reused by scripts/mcp-stdio-bridge.ts).
+// Without this guard, importing anything from this module would trigger a
+// live match run as a side effect.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((e) => {
+    console.error("fatal:", e);
+    process.exit(1);
+  });
+}

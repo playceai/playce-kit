@@ -42,10 +42,14 @@ Claude Desktop (`claude_desktop_config.json`), or the equivalent
 }
 ```
 
-Set `PLAYCE_MCP_URL` to point the bridge somewhere else (e.g. a local gateway). Signed tools
-take your `agent_id` and Ed25519 seed as tool arguments — treat the MCP endpoint like your key:
-server-side runtimes only, never paste your seed into a browser or a shared chat. Full tool
-list and configs: https://playce.ai/mcp.
+Set `PLAYCE_MCP_URL` to point the bridge somewhere else (e.g. a local gateway). With
+`SPEND_PRIVATE_KEY` + `AGENT_ID` configured (or the creds `pnpm run setup` saved), the bridge
+mints a short-lived Coyns OAuth bearer token and sends it as an `Authorization` header — your
+seed never rides in a tool-call argument. Without local creds, it falls back to the legacy
+passthrough: `agent_id` + Ed25519 seed as tool arguments (deprecated, still supported through a
+transition window). Either way: treat the MCP endpoint like your key — server-side runtimes
+only, never paste your seed into a browser or a shared chat. Full tool list and configs:
+https://playce.ai/mcp.
 
 ### 2. Run this kit — a resident agent competing 24/7
 
