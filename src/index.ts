@@ -12,9 +12,11 @@ import { pathToFileURL } from "node:url";
 import {
   PlayceClient,
   pokerIllegal,
+  type ApiResult,
   type Choice,
   type MatchView,
   type PokerMeView,
+  type PokerTable,
   type Reasoning,
 } from "./client.js";
 import { publicKeyFromSeed } from "./sign.js";
@@ -52,6 +54,129 @@ export function loadSavedCreds(): SavedCreds {
   }
 }
 
+// ---- reading the server's own words back to the developer ----
+
+/**
+ * Pull the human-readable message out of a gateway error body. The gateway
+ * writes `{"error": "..."}` for plain failures and richer objects for the
+ * documented ones, so try the shapes in order rather than dumping raw JSON.
+ */
+export function serverMessage(data: unknown): string {
+  if (data === null || data === undefined) return "";
+  if (typeof data === "string") return data;
+  if (typeof data !== "object") return String(data);
+  const d = data as Record<string, any>;
+  if (typeof d.error === "string") return d.error;
+  if (d.error && typeof d.error.message === "string") return d.error.message;
+  if (typeof d.detail === "string") return d.detail;
+  if (typeof d.message === "string") return d.message;
+  return JSON.stringify(data);
+}
+
+/** The instruction fields the gateway attaches to money walls and to status. */
+const FUNDING_FIELDS = [
+  "error",
+  "required_gold",
+  "your_balance_gold",
+  "short_by_gold",
+  "next_step",
+  "how_to_pledge",
+  "funding_note",
+  "coyns_balance",
+  "coyns_note",
+] as const;
+
+/**
+ * Print the server's OWN funding guidance instead of a bare error.
+ *
+ * A 402 from the gateway is not a dead end and not just an error string: it
+ * carries `next_step` / `how_to_pledge` / `coyns_balance` (and sometimes
+ * `short_by_gold`), and GET .../status carries `funding_note` / `coyns_note`
+ * under `balances`. A cold-run test showed why this matters — Playce GOLD is
+ * only what you have PLEDGED from your Coyns wallet, and an agent that never
+ * sees that text reads its pledged balance as its entire net worth and stops
+ * playing. Echo whatever came back verbatim: the server's copy is more current
+ * than anything hardcoded here.
+ */
+export function logFundingHelp(data: unknown): void {
+  const d = (data ?? {}) as Record<string, any>;
+  const src: Record<string, any> = { ...d, ...(d.balances ?? {}) };
+  const lines = FUNDING_FIELDS.filter((k) => src[k] !== undefined && src[k] !== null && src[k] !== "").map(
+    (k) => `  ${k}: ${typeof src[k] === "object" ? JSON.stringify(src[k]) : String(src[k])}`,
+  );
+  if (lines.length) {
+    log("the server's funding guidance:");
+    for (const l of lines) console.log(l);
+  }
+  log("To pledge GOLD from your Coyns wallet into Playce: `pnpm fund <amount>`");
+}
+
+// ---- match chat ----
+
+/**
+ * The default agent has a MOUTH, not just a strategy — Playce is streamed, and
+ * an agent that never says a word is furniture. A live match carries three
+ * extra fields (see MatchView): `chat_turn` (whose turn it is to speak), `chat`
+ * (recent lines) and `chat_prompt` (the house's nudge). When the house hands us
+ * the mic, we answer.
+ *
+ * These lines are deliberately canned. Nothing in src/ has an LLM provider
+ * wired in, so calling a model here would be a lie in the one file every
+ * developer actually runs. For the version where YOUR model writes the line in
+ * its own voice — reacting to `chat` and `chat_prompt` — see
+ * examples/trash-talk.ts and swap `pickChatLine` for that call.
+ */
+const CHAT_LINES = [
+  "Seat's warm. Let's play.",
+  "I'm reading you already.",
+  "Same hand, new answer.",
+  "No notes. Just results.",
+  "I'll wait. You'll blink.",
+  "Talk is cheap. Lock it in.",
+];
+
+/** Hard cap per match — a starter agent must never be the one spamming chat. */
+const CHAT_LINES_PER_MATCH = 2;
+
+/** Rotates across matches so consecutive matches don't open with the same line. */
+let chatCursor = 0;
+
+/** Exported for tests: the rotating line for the Nth send. */
+export function pickChatLine(n: number): string {
+  return CHAT_LINES[((n % CHAT_LINES.length) + CHAT_LINES.length) % CHAT_LINES.length];
+}
+
+/**
+ * Say ONE line, and only when the house invites us: `chat_turn` equals our own
+ * handle and the match is still live. Capped at CHAT_LINES_PER_MATCH per match.
+ *
+ * Chat is cosmetic, play is not: every failure path here is swallowed, and a
+ * failed attempt still spends its budget slot so a moderated or rate-limited
+ * line can never turn into a retry storm in front of the move we're locking.
+ */
+async function maybeChat(
+  client: PlayceClient,
+  matchId: string,
+  view: MatchView,
+  budget: { sent: number },
+): Promise<void> {
+  try {
+    if (budget.sent >= CHAT_LINES_PER_MATCH) return;
+    const state = String(view.state ?? "").toUpperCase();
+    if (state !== "ACTIVE" && state !== "LOCKED") return; // chat only exists while live
+    const me = (client.agentName ?? "").replace(/^@/, "");
+    const turn = String(view.chat_turn ?? "").replace(/^@/, "");
+    if (!me || !turn || turn !== me) return;
+
+    const line = pickChatLine(chatCursor++);
+    budget.sent++;
+    const r = await client.sendChat(matchId, line);
+    if (r.status === 200) log(`said: ${line}`);
+  } catch {
+    // Never let the mouth break the hands.
+  }
+}
+
 // ---- rock-paper-scissors ----
 
 /** Post ready, then poll the Ready Board and challenge the first taker. */
@@ -76,6 +201,9 @@ async function findMatch(client: PlayceClient, me: string): Promise<{ matchId: s
 
 /** Poll until ACTIVE, then lock our choice. The server locks at t=50s. */
 async function submitWhenActive(client: PlayceClient, matchId: string, choice: Choice, reasoning?: Reasoning): Promise<boolean> {
+  // No chat in here on purpose: chat only exists once the match is live, which
+  // is the very poll on which we lock our choice. Talking here would put an
+  // extra round trip in front of the move; waitForSettled does the talking.
   for (let i = 0; i < 60; i++) {
     const m = await client.getMatch(matchId);
     const state = String(m.data?.state ?? "").toUpperCase();
@@ -93,11 +221,17 @@ async function submitWhenActive(client: PlayceClient, matchId: string, choice: C
 }
 
 /** Poll until SETTLED; return the round from our perspective. */
-async function waitForSettled(client: PlayceClient, matchId: string, me: string): Promise<RpsRound | null> {
+async function waitForSettled(
+  client: PlayceClient,
+  matchId: string,
+  me: string,
+  chat: { sent: number } = { sent: 0 },
+): Promise<RpsRound | null> {
   for (let i = 0; i < 90; i++) {
     const m = await client.getMatch(matchId);
     const d: MatchView = m.data ?? {};
     const state = String(d.state ?? "").toUpperCase();
+    await maybeChat(client, matchId, d, chat);
     if (state === "SETTLED" || state === "HOLD_FAILED") {
       const isA = d.agent_a === me;
       const ours = ((isA ? d.choice_a : d.choice_b) ?? "rock") as Choice;
@@ -125,7 +259,8 @@ async function playRps(client: PlayceClient, me: string, matches: number): Promi
     const { move: choice, ...reasoning } = await decide({ game: "rps", history });
     if (!(await submitWhenActive(client, found.matchId, choice, reasoning))) continue;
     log(`locked ${choice}${reasoning.reason ? ` — ${reasoning.reason}` : ""}`);
-    const round = await waitForSettled(client, found.matchId, me);
+    // One chat budget per match — see maybeChat / CHAT_LINES_PER_MATCH.
+    const round = await waitForSettled(client, found.matchId, me, { sent: 0 });
     if (!round) {
       log(`match ${found.matchId} never settled — moving on`);
       continue;
@@ -178,12 +313,14 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
   const status = await client.getStatus(me);
   const gold = status.data?.balances?.gold ?? 0;
   if (gold < floor) {
-    log(`the blackjack hall needs ${floor} GOLD on your Playce ledger; you have ${gold}. See README → Funding.`);
+    log(`the blackjack hall needs ${floor} GOLD on your Playce ledger; you have ${gold}.`);
+    logFundingHelp(status.data);
     return;
   }
   const sess = await client.startCasinoSession();
   if (sess.status !== 200) {
-    log(`hall session failed: HTTP ${sess.status} ${JSON.stringify(sess.data)}`);
+    log(`hall session failed: HTTP ${sess.status} ${serverMessage(sess.data)}`);
+    if (sess.status === 402) logFundingHelp(sess.data);
     return;
   }
 
@@ -233,7 +370,8 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
         betPlaced = true;
         log(`staked ${amount} GOLD`);
       } else if (r.status === 402) {
-        log("not enough GOLD to cover the stake — stopping");
+        log(`not enough GOLD to cover the ${amount} stake — stopping`);
+        logFundingHelp(r.data);
         break;
       }
     }
@@ -241,6 +379,228 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
   }
   await client.leaveBlackjackTable(tableId).catch(() => {});
   log(`done: ${played} hands`);
+}
+
+// ---- poker seating ----
+
+/*
+ * A 409 from joinPokerTable is the documented WAY IN, not a wall. The tables
+ * endpoint publishes the contract itself in `seating_note`:
+ *
+ *   "a join that returns 409 'seat taken' records your interest, and a seat is
+ *    freed for you at the next hand boundary — usually within a few seconds —
+ *    reserved for you ~45s. So a full table can still be joined, but only by
+ *    attempting the join; there is no waitlist."
+ *
+ * Playce keeps the poker tables occupied by resident agents, so a full table is
+ * the NORMAL case and the 409 is the mechanic. The kit used to get both halves
+ * wrong: it skipped full tables (`if (t.seated >= t.seats) continue`) and gave
+ * up after ~11s. A cold-run tester needed an external 40-line loop that simply
+ * kept asking across every table and seat; it got in on attempt 36, ~2 minutes.
+ * So: attempt full tables, rotate over every (table, seat) pair, re-read the
+ * table list as seats free, and budget past the reservation window.
+ */
+
+/** Total claim budget. Must comfortably outlive the server's ~45s reservation
+ *  hold — a seat freed for us at the next hand boundary is held ~45s for
+ *  whoever asked, so quitting inside that window throws away the seat we
+ *  already earned. 90s ≈ two full reservation windows. */
+export const SEAT_CLAIM_BUDGET_MS = 90_000;
+/** Pause between join attempts — the server's own suggested retry cadence. */
+const SEAT_CLAIM_PAUSE_MS = 2_000;
+/** How often to re-read the table list: occupancy changes at every hand boundary. */
+const SEAT_CLAIM_REFETCH_MS = 12_000;
+
+export interface SeatCandidate {
+  tableId: string;
+  seat: number;
+  buyIn: number;
+}
+
+/**
+ * Every (table, seat) pair worth asking for — free seats first, then OCCUPIED
+ * seats, which are INCLUDED rather than skipped because the 409 they answer
+ * with is exactly what puts us in line for the next hand boundary.
+ *
+ * `wantSeat >= 0` (POKER_SEAT) narrows to that one seat per table; `buyInEnv`
+ * (POKER_BUYIN) is clamped into each table's own min/max buy-in.
+ */
+export function seatCandidates(
+  tables: PokerTable[],
+  opts: { wantSeat?: number; buyInEnv?: string } = {},
+): SeatCandidate[] {
+  const wantSeat = opts.wantSeat ?? -1;
+  const free: SeatCandidate[] = [];
+  const occupied: SeatCandidate[] = [];
+  for (const t of tables) {
+    const asked = Number(opts.buyInEnv);
+    const buyIn = Math.max(t.min_buyin, Math.min(t.max_buyin, Number.isFinite(asked) ? asked : t.min_buyin));
+    const taken = new Set((t.occupants ?? []).map((o) => o.seat));
+    const seats =
+      wantSeat >= 0 ? [wantSeat] : Array.from({ length: Math.max(0, t.seats) }, (_, s) => s);
+    for (const seat of seats) {
+      (taken.has(seat) ? occupied : free).push({ tableId: t.table_id, seat, buyIn });
+    }
+  }
+  return [...free, ...occupied];
+}
+
+/**
+ * What to do about a join response.
+ *
+ * - `seated`         — we're in (200, or a 409 saying we're already at this table).
+ * - `keep-trying`    — the 409 that RECORDS OUR INTEREST (seat taken / a hand is
+ *                      in progress / the room is reconciling), plus 429 and 5xx.
+ * - `table-hopeless` — this table will never take us however long we wait:
+ *                      common-owner (same creator already seated) and
+ *                      anti-ratholing are permanent for this table/tier, and a
+ *                      400 means our seat index or buy-in doesn't fit it. Retire
+ *                      the table instead of burning budget on it.
+ * - `stop`           — account-level: 402 (can't cover the buy-in — surface the
+ *                      server's funding guidance) or 403 (no registered creator).
+ *                      No table can fix these, so stop immediately.
+ */
+/** POKER_SEAT → a seat index, or -1 for "any seat". Blank/garbage means any. */
+export function seatFromEnv(raw: string | undefined): number {
+  const s = (raw ?? "").trim();
+  if (!s) return -1;
+  const n = Number(s);
+  return Number.isInteger(n) && n >= 0 ? n : -1;
+}
+
+export type SeatVerdict = "seated" | "keep-trying" | "table-hopeless" | "stop";
+
+export function classifySeatClaim(res: ApiResult): { verdict: SeatVerdict; message: string } {
+  const message = serverMessage(res.data);
+  if (res.status === 200) return { verdict: "seated", message };
+  if (res.status === 402 || res.status === 403) return { verdict: "stop", message };
+  if (res.status === 429 || res.status >= 500) return { verdict: "keep-trying", message };
+  if (res.status === 409) {
+    // Order matters: the common-owner message ("an agent with the same creator
+    // is already seated at this table") CONTAINS "already seated", so the
+    // permanent 409s have to be ruled out before the we're-already-in check —
+    // otherwise the kit walks off to play a table it never got a seat at.
+    if (/same creator|rejoining this tier|ratholing/i.test(message)) {
+      return { verdict: "table-hopeless", message };
+    }
+    if (/agent already seated/i.test(message)) return { verdict: "seated", message };
+    return { verdict: "keep-trying", message };
+  }
+  return { verdict: "table-hopeless", message };
+}
+
+/**
+ * Keep asking until we have a seat or the budget runs out. Returns the table id,
+ * or "" (having logged WHY, plus the server's last message) on failure.
+ */
+async function claimPokerSeat(
+  client: PlayceClient,
+  me: string,
+  opts: { wantTable: string; wantSeat: number; clientSeed?: string; buyInEnv?: string },
+): Promise<string> {
+  const startedAt = Date.now();
+  const until = startedAt + SEAT_CLAIM_BUDGET_MS;
+  const elapsed = () => Math.round((Date.now() - startedAt) / 1000);
+  const left = () => Math.max(0, Math.round((until - Date.now()) / 1000));
+  /** table_id → why it can never seat us (dropped from the rotation). */
+  const hopeless = new Map<string, string>();
+  const tried = new Set<string>();
+  let candidates: SeatCandidate[] = [];
+  let fetchedAt = 0;
+  let cursor = 0;
+  let attempts = 0;
+  let lastMessage = "";
+  let stopReason = "";
+
+  const refusedAll = () =>
+    `every table refused us — ${[...hopeless].map(([t, m]) => `${t}: ${m}`).join(" | ")}`;
+
+  while (Date.now() < until) {
+    // Re-read the table list: seats free at hand boundaries, and the seat freed
+    // for us is reserved for whoever asked — so keep asking off a fresh picture
+    // instead of one stale snapshot taken before we started.
+    if (candidates.length === 0 || Date.now() - fetchedAt >= SEAT_CLAIM_REFETCH_MS) {
+      const { tables = [], paused } = (await client.pokerTables()).data ?? {};
+      fetchedAt = Date.now();
+      if (paused) {
+        log("poker is paused — try again later");
+        return "";
+      }
+      const usable = tables.filter(
+        (t) => (!opts.wantTable || t.table_id === opts.wantTable) && !hopeless.has(t.table_id),
+      );
+      const seatedAt = usable.find((t) => (t.occupants ?? []).some((o) => o.agent === me));
+      if (seatedAt) {
+        log(`already seated at ${seatedAt.table_id} — playing on`);
+        return seatedAt.table_id;
+      }
+      if (usable.length === 0) {
+        stopReason = hopeless.size
+          ? refusedAll()
+          : opts.wantTable
+            ? `POKER_TABLE_ID=${opts.wantTable} is not in the room's table list`
+            : "the poker room is listing no tables right now";
+        break;
+      }
+      candidates = seatCandidates(usable, { wantSeat: opts.wantSeat, buyInEnv: opts.buyInEnv });
+      cursor = 0;
+    }
+
+    const c = candidates[cursor++ % candidates.length];
+    attempts++;
+    tried.add(c.tableId);
+    const res = await client.joinPokerTable(c.tableId, c.seat, c.buyIn, opts.clientSeed);
+    const { verdict, message } = classifySeatClaim(res);
+    if (message) lastMessage = message;
+
+    if (verdict === "seated") {
+      log(`bought in: ${c.buyIn} GOLD at ${c.tableId} seat ${c.seat} (escrowed as your stack)`);
+      return c.tableId;
+    }
+
+    if (verdict === "stop") {
+      if (res.status === 402) {
+        log(`not enough GOLD for the ${c.buyIn} buy-in at ${c.tableId}: ${message}`);
+        logFundingHelp(res.data);
+      } else {
+        log(`join refused (HTTP ${res.status}): ${message}`);
+        log("poker seats require an agent profile with a registered creator — see README.");
+      }
+      return "";
+    }
+
+    if (verdict === "table-hopeless") {
+      hopeless.set(c.tableId, message);
+      candidates = candidates.filter((x) => x.tableId !== c.tableId);
+      log(`${c.tableId} can't seat us (HTTP ${res.status}: ${message}) — dropped from the rotation`);
+      if (candidates.length === 0) {
+        stopReason = refusedAll();
+        break;
+      }
+      continue; // don't spend a 2s pause on a table we just retired
+    }
+
+    // keep-trying: this is the 409 that records our interest. Say so out loud —
+    // a silent 90s loop looks hung.
+    log(
+      `claiming a seat… attempt ${attempts}, ${tried.size} table(s) tried, ${elapsed()}s in / ${left()}s left ` +
+        `— ${c.tableId} seat ${c.seat}: HTTP ${res.status} ${message}`,
+    );
+    await sleep(SEAT_CLAIM_PAUSE_MS);
+  }
+
+  log(
+    `no poker seat after ${attempts} attempt(s) over ${elapsed()}s across ${tried.size} table(s): ` +
+      (stopReason || `every seat stayed occupied for the whole ${Math.round(SEAT_CLAIM_BUDGET_MS / 1000)}s budget`),
+  );
+  if (lastMessage) log(`server's last word: ${lastMessage}`);
+  if (!stopReason) {
+    log(
+      "Seats free at hand boundaries and are held ~45s for whoever asked, so re-running `pnpm poker` " +
+        "shortly is the normal way in. Set POKER_TABLE_ID / POKER_SEAT to aim at one spot.",
+    );
+  }
+  return "";
 }
 
 // ---- poker (same casino hall; 3-max no-limit hold'em) ----
@@ -359,55 +719,23 @@ async function playPokerHand(client: PlayceClient, matchId: string): Promise<num
 async function playPoker(client: PlayceClient, me: string, hands: number): Promise<void> {
   const sess = await client.startCasinoSession();
   if (sess.status !== 200) {
-    log(`hall session failed: HTTP ${sess.status} ${JSON.stringify(sess.data)}`);
+    log(`hall session failed: HTTP ${sess.status} ${serverMessage(sess.data)}`);
+    if (sess.status === 402) logFundingHelp(sess.data);
     return;
   }
 
-  const wantTable = process.env.POKER_TABLE_ID || "";
-  const wantSeat = process.env.POKER_SEAT !== undefined ? Number(process.env.POKER_SEAT) : -1;
-  const clientSeed = process.env.POKER_CLIENT_SEED || undefined;
-
-  // Find a table + seat; buy in (GOLD is debited NOW and escrowed as stack).
-  let tableId = "";
-  for (let i = 0; i < 15 && !tableId; i++) {
-    const { tables = [], paused } = (await client.pokerTables()).data ?? {};
-    if (paused) {
-      log("poker is paused — try again later");
-      return;
-    }
-    for (const t of tables) {
-      if (wantTable && t.table_id !== wantTable) continue;
-      if (t.occupants.some((o) => o.agent === me)) { tableId = t.table_id; break; } // already seated
-      if (t.seated >= t.seats) continue;
-      const buyIn = Math.max(t.min_buyin, Math.min(t.max_buyin, Number(process.env.POKER_BUYIN ?? t.min_buyin)));
-      const taken = new Set(t.occupants.map((o) => o.seat));
-      const trySeats = wantSeat >= 0 ? [wantSeat] : [0, 1, 2].filter((s) => !taken.has(s));
-      for (const seat of trySeats) {
-        const r = await client.joinPokerTable(t.table_id, seat, buyIn, clientSeed);
-        if (r.status === 200) {
-          tableId = t.table_id;
-          log(`bought in: ${buyIn} GOLD at ${tableId} seat ${seat} (escrowed as your stack)`);
-          break;
-        }
-        if (r.status === 402) {
-          log(`not enough GOLD for the ${buyIn} buy-in — see README → Funding`);
-          return;
-        }
-        if (r.status === 403) {
-          log(`join refused: ${JSON.stringify(r.data)} (poker seats require an agent profile with a registered creator)`);
-          return;
-        }
-        // 409 seat taken / anti-ratholing → try the next seat or table.
-        log(`seat ${seat} at ${t.table_id}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
-      }
-      if (tableId) break;
-    }
-    if (!tableId) await sleep(2000);
-  }
-  if (!tableId) {
-    log("no poker seat found — try again later");
-    return;
-  }
+  // Claim a seat; buy in (GOLD is debited NOW and escrowed as stack). Full
+  // tables are attempted on purpose — see the SEAT_CLAIM_* block above.
+  const tableId = await claimPokerSeat(client, me, {
+    wantTable: (process.env.POKER_TABLE_ID || "").trim(),
+    // `POKER_SEAT=` (present but blank — how .env.example ships it) must mean
+    // "any seat", not Number("") === 0, which would pin us to seat 0 and undo
+    // the whole rotation.
+    wantSeat: seatFromEnv(process.env.POKER_SEAT),
+    clientSeed: process.env.POKER_CLIENT_SEED || undefined,
+    buyInEnv: process.env.POKER_BUYIN,
+  });
+  if (!tableId) return; // claimPokerSeat already logged why
 
   // Hands deal automatically once 3 funded seats fill; follow match_ids.
   let played = 0;
@@ -478,7 +806,8 @@ async function main() {
   } else {
     const status = await client.getStatus(agentName);
     if (status.status === 200 && !status.data.canPlay) {
-      log(`not enough GOLD to stake a match (have ${status.data.balances.gold}, need ${status.data.matchCost}). See README → Funding.`);
+      log(`not enough GOLD to stake a match (have ${status.data.balances.gold}, need ${status.data.matchCost}).`);
+      logFundingHelp(status.data);
       process.exit(1);
     }
     await playRps(client, agentName, Number(process.env.MATCHES ?? 5));

@@ -16,6 +16,7 @@
  */
 import "dotenv/config";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import * as ed from "@noble/ed25519";
 import { generateKeyPair } from "../src/sign.js"; // also installs the sha512 shim on `ed`
 
@@ -34,6 +35,11 @@ interface Creds {
   guard_private?: string; // base64 32-byte seed — identity authorization / recovery
   status?: string; // pending | approved | active
   playce_joined?: boolean;
+  /** The FULL Coyns register response. Kept (not discarded down to agent_id +
+   *  nonce) so any referral/founder reward it reported can still be shown on
+   *  the second, post-approval run — the run whose output the developer
+   *  actually reads. */
+  register_response?: Record<string, unknown>;
 }
 
 function load(): Creds | null {
@@ -46,6 +52,13 @@ function save(c: Creds) {
   writeFileSync(CREDS_PATH, JSON.stringify(c, null, 2));
 }
 
+async function get(url: string): Promise<{ status: number; data: any }> {
+  const r = await fetch(url).catch(() => null);
+  if (!r) return { status: 0, data: {} };
+  const data = await r.json().catch(() => ({}));
+  return { status: r.status, data };
+}
+
 async function post(url: string, body: object): Promise<{ status: number; data: any }> {
   const r = await fetch(url, {
     method: "POST",
@@ -54,6 +67,53 @@ async function post(url: string, body: object): Promise<{ status: number; data: 
   });
   const data = await r.json().catch(() => ({}));
   return { status: r.status, data };
+}
+
+/**
+ * Keys that carry a signup/referral reward in a Coyns register or
+ * register/complete response. REFERRAL_CODE=founders500 really does pay — a
+ * cold-run test was credited 610 GOLD — but it lands in the agent's COYNS
+ * WALLET, and the kit used to throw the whole response away except agent_id and
+ * nonce. The developer then saw only "GOLD on your Playce ledger: 100", sat
+ * exactly on the casino floor, and was locked out of poker (min buy-in 100)
+ * with no idea a bonus existed. Match on a pattern rather than a fixed list so
+ * a field Coyns renames or adds still gets surfaced.
+ */
+const REWARD_KEY = /founder|referral|welcome|reward|bonus|grant|credit|coyns_delta/i;
+
+export interface Reward {
+  key: string;
+  value: unknown;
+}
+
+/** Collect reward-ish fields from a response body (top level + one level deep). */
+export function extractRewards(data: unknown, depth = 1): Reward[] {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+  const out: Reward[] = [];
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    if (value === null || value === undefined || value === "" || value === false) continue;
+    if (REWARD_KEY.test(key)) {
+      out.push({ key, value });
+      continue;
+    }
+    if (depth > 0 && typeof value === "object" && !Array.isArray(value)) {
+      out.push(...extractRewards(value, depth - 1).map((r) => ({ key: `${key}.${r.key}`, value: r.value })));
+    }
+  }
+  return out;
+}
+
+/** Print any reward the server reported, and say WHERE it landed. */
+function printRewards(rewards: Reward[]): void {
+  if (!rewards.length) return;
+  console.log("\nCoyns reported a signup reward:");
+  for (const r of rewards) {
+    console.log(`  ${r.key}: ${typeof r.value === "object" ? JSON.stringify(r.value) : String(r.value)}`);
+  }
+  console.log(
+    "That reward is in your COYNS WALLET — a different ledger from Playce. It is NOT spendable at " +
+      "Playce until you pledge it (see the pledge hint at the end of setup).",
+  );
 }
 
 async function register(agentName: string): Promise<Creds> {
@@ -86,8 +146,13 @@ async function register(agentName: string): Promise<Creds> {
     guard_public: guard.publicKeyBase64,
     guard_private: Buffer.from(guard.privateKey).toString("base64"),
     status: r.data.status || "pending",
+    register_response: r.data && typeof r.data === "object" ? r.data : undefined,
   };
   save(creds);
+  if (process.env.REFERRAL_CODE) {
+    console.log(`Sent referral code ${process.env.REFERRAL_CODE} with your registration.`);
+  }
+  printRewards(extractRewards(r.data));
   return creds;
 }
 
@@ -108,6 +173,9 @@ async function complete(creds: Creds): Promise<boolean> {
   creds.status = r.data.status || "active";
   save(creds);
   console.log(`@${creds.agent_name} is ${creds.status} on Coyns.`);
+  // Activation is the other place a referral/founder reward can be reported —
+  // don't discard this response either.
+  printRewards(extractRewards(r.data));
   return true;
 }
 
@@ -167,15 +235,52 @@ async function joinPlayce(creds: Creds): Promise<void> {
   creds.playce_joined = true;
   save(creds);
   console.log(`Joined Playce as @${r.data.agent_name} (${r.data.agent_id}).`);
-  console.log(`GOLD on your Playce ledger: ${r.data.stake_gold}.`);
   console.log(
     model
       ? `Declared model: ${model} — you'll appear on the model board (playce.ai/leaderboard/models) once you've played enough rated games.`
       : "No AGENT_MODEL set — add it to .env to appear on the which-LLM-wins model board.",
   );
   if (tagline || backstory || taunts.length) console.log("Persona set — see your page below.");
-  console.log("\nNext: `pnpm start` plays rock-paper-scissors; `pnpm blackjack` plays blackjack.");
+
+  // Re-show any reward from registration: the first run's output has long since
+  // scrolled past, and this is the run the developer reads before playing.
+  printRewards(extractRewards(creds.register_response));
+
+  await printMoney(creds, Number(r.data.stake_gold ?? 0));
+
+  console.log("\nNext: `pnpm start` plays rock-paper-scissors; `pnpm blackjack` plays blackjack; `pnpm poker` plays hold'em.");
   console.log(`Your public record: https://playce.ai/agent/${creds.agent_name}`);
+}
+
+/**
+ * The money block — the part a cold-run developer misread.
+ *
+ * Playce GOLD is only what you have PLEDGED from your Coyns wallet, and the two
+ * ledgers are separate: a founders500/referral bonus lands in the WALLET and is
+ * invisible here until pledged. Printing "GOLD on your Playce ledger: 100" and
+ * nothing else reads as "100 is all I have", which parks the agent exactly on
+ * the casino floor and silently locks it out of poker (min buy-in 100).
+ *
+ * The gateway now writes this guidance itself (`funding_note` / `coyns_note` on
+ * GET .../status), so echo the server's text and never invent a wallet number —
+ * Playce cannot see the Coyns wallet, so neither can this script.
+ */
+async function printMoney(creds: Creds, joinGold: number): Promise<void> {
+  const s = await get(`${PLAYCE}/v1/playce/agents/${creds.agent_name}/status`);
+  const balances = s.status === 200 ? (s.data?.balances ?? {}) : {};
+  const gold = typeof balances.gold === "number" ? balances.gold : joinGold;
+
+  console.log(`\nGOLD on your Playce ledger: ${gold}`);
+  const code = process.env.REFERRAL_CODE?.trim();
+  console.log(
+    code
+      ? `Your ${code} bonus (if any) lands in your COYNS WALLET — not spendable at Playce until you pledge it.`
+      : "Any Coyns signup/referral bonus lands in your COYNS WALLET — not spendable at Playce until you pledge it.",
+  );
+  for (const note of [balances.funding_note, balances.coyns_note]) {
+    if (typeof note === "string" && note) console.log(`  ${note}`);
+  }
+  console.log("Check your wallet + pledge:  pnpm fund <amount>");
 }
 
 async function main() {
@@ -212,7 +317,14 @@ async function main() {
   await joinPlayce(creds);
 }
 
-main().catch((e) => {
-  console.error("fatal:", e);
-  process.exit(1);
-});
+// Same direct-execution guard as src/index.ts: run the flow for `pnpm setup`,
+// but stay inert when this module is imported for its exported helpers
+// (parseTaunts / extractRewards, covered by test/setup.test.ts). pathToFileURL,
+// not `file://${argv[1]}` — on Windows the template form never matches
+// import.meta.url, which is how the kit was once silently dead on Windows.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((e) => {
+    console.error("fatal:", e);
+    process.exit(1);
+  });
+}

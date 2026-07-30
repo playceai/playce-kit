@@ -26,11 +26,11 @@
  * Auth: if SPEND_PRIVATE_KEY + AGENT_ID are configured (.env, or the creds
  * `pnpm setup` saved), this bridge mints a short-lived Coyns OAuth bearer
  * token and attaches it as an Authorization header — your seed never rides
- * in a tool-call argument. Without local creds configured, it falls back to
- * pure passthrough: whatever agent_id/private_key_hex the caller puts in
- * tool arguments is forwarded as-is (the deprecated path, working through
- * Playce's dual-support window). Either way: server-side runtimes only,
- * never paste your seed into a browser or a shared chat.
+ * in a tool-call argument. This is required for every signed tool except
+ * deposit_register/withdraw_gold/trade-accept, which still take agent_id +
+ * private_key_hex directly as tool arguments (Playce removed the tool-argument
+ * path for every other signed tool on 2026-07-25). Either way: server-side
+ * runtimes only, never paste your seed into a browser or a shared chat.
  */
 import { createInterface } from "node:readline";
 import { getCachedToken, invalidateCachedToken } from "../src/oauth.js";
@@ -47,9 +47,16 @@ const SPEND_PRIVATE_KEY = process.env.SPEND_PRIVATE_KEY || saved.spend_private |
 const write = (obj: unknown) => process.stdout.write(JSON.stringify(obj) + "\n");
 
 /**
- * Mint/refresh a bearer token if local creds are configured; null otherwise
- * (pure legacy passthrough — the deprecated seed-in-body convention still
- * works through Playce's dual-support window either way).
+ * Mint/refresh a bearer token if local creds are configured; null otherwise.
+ *
+ * Playce removed the agent_id + private_key_hex tool-argument path for every
+ * bearer-eligible tool on 2026-07-25 — without local creds, calls to those
+ * tools now get a clear "Authorization: Bearer <token> is required" error
+ * straight from Playce, since this bridge has nothing to attach. A few
+ * value-moving tools (deposit_register, withdraw_gold, trade-accept) still
+ * take agent_id + private_key_hex directly as tool arguments regardless —
+ * that path was never routed through this bridge's token logic, so it keeps
+ * working via plain passthrough whether or not local creds are configured.
  */
 async function ensureToken(): Promise<string | null> {
   if (!AGENT_ID || !SPEND_PRIVATE_KEY) return null;
@@ -58,7 +65,7 @@ async function ensureToken(): Promise<string | null> {
     const { token } = await getCachedToken({ agentId: AGENT_ID, privateKey });
     return token;
   } catch (e) {
-    console.error(`bridge: token mint failed, falling back to legacy seed-in-body: ${String(e)}`);
+    console.error(`bridge: token mint failed: ${String(e)}`);
     return null;
   }
 }
@@ -66,9 +73,9 @@ async function ensureToken(): Promise<string | null> {
 async function postToPlayce(line: string, token: string | null): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (token) headers.authorization = `Bearer ${token}`;
-  // body is always the raw line, unchanged — the deprecated thing being
-  // removed is the seed-in-body convention (whatever the caller put in tool
-  // arguments), not a header this bridge ever injected itself.
+  // body is always the raw line, unchanged — deposit_register/withdraw_gold/
+  // trade-accept still take agent_id + private_key_hex as tool arguments
+  // directly (never via a header this bridge injects).
   return fetch(URL, { method: "POST", headers, body: line });
 }
 

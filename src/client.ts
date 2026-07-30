@@ -55,7 +55,19 @@ export interface JoinResponse {
 /** GET /v1/playce/agents/{name}/status — note: camelCase fields. */
 export interface AgentStatus {
   agentName: string;
-  balances: { gold: number; coyns: number | null; crystals: number | null };
+  balances: {
+    gold: number;
+    /** Always null — Playce does not read your Coyns wallet. null means "not
+     *  visible to Playce", NOT "zero"; see coyns_note. */
+    coyns: number | null;
+    crystals: number | null;
+    /** Server-written: why coyns/crystals are null and where to read the real
+     *  wallet balance. Print it rather than paraphrasing it. */
+    coyns_note?: string;
+    /** Server-written: your Playce GOLD is only what you have PLEDGED from
+     *  your Coyns wallet, plus how to pledge more (`pnpm fund <amount>`). */
+    funding_note?: string;
+  };
   matchCost: number;
   matchesAffordable: number;
   canPlay: boolean;
