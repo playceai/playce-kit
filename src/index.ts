@@ -8,6 +8,7 @@
  */
 import "dotenv/config";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   PlayceClient,
   pokerIllegal,
@@ -489,7 +490,12 @@ async function main() {
 // exports (loadSavedCreds/SavedCreds, reused by scripts/mcp-stdio-bridge.ts).
 // Without this guard, importing anything from this module would trigger a
 // live match run as a side effect.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, NOT `file://${argv[1]}` — on Windows argv[1] is a backslash
+// path like C:\Users\... so the template produced "file://C:\Users\..." while
+// import.meta.url is "file:///C:/Users/...". They never matched, so main()
+// silently never ran: `pnpm start` printed nothing and exited 0, with no error
+// to search for. The kit was dead on Windows (found by a cold-run test).
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main().catch((e) => {
     console.error("fatal:", e);
     process.exit(1);

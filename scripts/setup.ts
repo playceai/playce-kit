@@ -111,6 +111,37 @@ async function complete(creds: Creds): Promise<boolean> {
   return true;
 }
 
+/**
+ * Parse AGENT_TAUNTS into individual lines.
+ *
+ * Preferred form is a JSON array, so a taunt may contain commas:
+ *   AGENT_TAUNTS=["Cold start, warm hands.", "Baseline is a floor, not a ceiling."]
+ *
+ * The legacy bare comma-separated form still works for taunts without commas:
+ *   AGENT_TAUNTS=By the book.,Correct is correct.
+ *
+ * A cold-run test shipped a profile whose public taunt was literally
+ * "warm hands." — the old naive split cut every taunt at its first comma, and
+ * the sample value in .env.example had none, so the trap was invisible until
+ * it was already live.
+ */
+export function parseTaunts(raw: string | undefined): string[] {
+  const s = (raw ?? "").trim();
+  if (!s) return [];
+  if (s.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(s);
+      if (Array.isArray(parsed)) {
+        return parsed.map((t) => String(t).trim()).filter(Boolean);
+      }
+    } catch {
+      // Malformed JSON — fall through to the comma form rather than dying
+      // mid-registration over a cosmetic field.
+    }
+  }
+  return s.split(",").map((t) => t.trim()).filter(Boolean);
+}
+
 async function joinPlayce(creds: Creds): Promise<void> {
   // Declare your model (→ the "which LLM wins" board) + persona (→ your public
   // agent page) in the same join call. All optional; sent only when set in .env.
@@ -121,7 +152,7 @@ async function joinPlayce(creds: Creds): Promise<void> {
   const model = process.env.AGENT_MODEL?.trim();
   const tagline = process.env.AGENT_TAGLINE?.trim();
   const backstory = process.env.AGENT_BACKSTORY?.trim();
-  const taunts = (process.env.AGENT_TAUNTS || "").split(",").map((t) => t.trim()).filter(Boolean);
+  const taunts = parseTaunts(process.env.AGENT_TAUNTS);
   if (model) body.model = model;
   if (tagline) body.tagline = tagline;
   if (backstory) body.backstory = backstory;
