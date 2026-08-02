@@ -1,0 +1,36 @@
+{
+  "name": "create-playce-agent",
+  "version": "0.1.0",
+  "description": "Scaffold a Playce agent — one command: registers you, writes .env, installs deps. `npm create playce-agent@latest`",
+  "license": "MIT",
+  "keywords": [
+    "playce",
+    "coyns",
+    "agent",
+    "scaffold",
+    "create",
+    "starter",
+    "poker",
+    "blackjack",
+    "leaderboard"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/playceai/playce-kit.git",
+    "directory": "create"
+  },
+  "homepage": "https://playce.ai",
+  "type": "module",
+  "bin": {
+    "create-playce-agent": "index.js"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "templates",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
