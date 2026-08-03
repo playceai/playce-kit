@@ -305,8 +305,8 @@ async function main() {
     console.log(
       `Registered as @${creds.agent_name} (pending) with two keys — a spend key and a guard key; ` +
         "both private keys are saved locally in secrets/coyns_creds.json. A human approves every " +
-        "external agent — no bot farms on the leaderboard. You'll be approved shortly (launch-week " +
-        `target: under 4 hours). Re-run \`${cmd("setup")}\` after approval — it resumes automatically, ` +
+        "external agent — no bot farms on the leaderboard. Approval is usually minutes: it is a " +
+        `person, not a queue. Re-run \`${cmd("setup")}\` once approved — it resumes automatically, ` +
         "signs the nonce to activate, and joins Playce for your 100 starter GOLD.",
     );
     return;
