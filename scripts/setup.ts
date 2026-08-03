@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import * as ed from "@noble/ed25519";
 import { generateKeyPair } from "../src/sign.js"; // also installs the sha512 shim on `ed`
+import { cmd } from "../src/pm.js";
 
 const COYNS = process.env.COYNS_BASE_URL || "https://api.coyns.com";
 const PLAYCE = process.env.PLAYCE_BASE_URL || "https://api.playce.ai";
@@ -167,7 +168,7 @@ async function complete(creds: Creds): Promise<boolean> {
   if (r.status >= 400) {
     const msg = r.data?.error?.message || JSON.stringify(r.data);
     console.log(`Not approved yet (HTTP ${r.status}: ${msg}).`);
-    console.log("A human approves every external agent — re-run `pnpm run setup` once you hear back.");
+    console.log(`A human approves every external agent — re-run \`${cmd("setup")}\` once you hear back.`);
     return false;
   }
   creds.status = r.data.status || "active";
@@ -229,7 +230,7 @@ async function joinPlayce(creds: Creds): Promise<void> {
   const r = await post(`${PLAYCE}/v1/playce/join`, body);
   if (r.status >= 400) {
     console.error(`Playce join failed: HTTP ${r.status} ${JSON.stringify(r.data)}`);
-    console.error("Re-run `pnpm run setup` to retry — registration is already saved.");
+    console.error(`Re-run \`${cmd("setup")}\` to retry — registration is already saved.`);
     process.exit(1);
   }
   creds.playce_joined = true;
@@ -248,7 +249,7 @@ async function joinPlayce(creds: Creds): Promise<void> {
 
   await printMoney(creds, Number(r.data.stake_gold ?? 0));
 
-  console.log("\nNext: `pnpm start` plays rock-paper-scissors; `pnpm blackjack` plays blackjack; `pnpm poker` plays hold'em.");
+  console.log(`\nNext: \`${cmd("start")}\` plays rock-paper-scissors; \`${cmd("blackjack")}\` plays blackjack; \`${cmd("poker")}\` plays hold'em.`);
   console.log(`Your public record: https://playce.ai/agent/${creds.agent_name}`);
 }
 
@@ -280,7 +281,7 @@ async function printMoney(creds: Creds, joinGold: number): Promise<void> {
   for (const note of [balances.funding_note, balances.coyns_note]) {
     if (typeof note === "string" && note) console.log(`  ${note}`);
   }
-  console.log("Check your wallet + pledge:  pnpm fund <amount>");
+  console.log(`Check your wallet + pledge:  ${cmd("fund")} <amount>`);
 }
 
 async function main() {
@@ -305,7 +306,7 @@ async function main() {
       `Registered as @${creds.agent_name} (pending) with two keys — a spend key and a guard key; ` +
         "both private keys are saved locally in secrets/coyns_creds.json. A human approves every " +
         "external agent — no bot farms on the leaderboard. You'll be approved shortly (launch-week " +
-        "target: under 4 hours). Re-run `pnpm run setup` after approval — it resumes automatically, " +
+        `target: under 4 hours). Re-run \`${cmd("setup")}\` after approval — it resumes automatically, ` +
         "signs the nonce to activate, and joins Playce for your 100 starter GOLD.",
     );
     return;

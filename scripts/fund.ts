@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto";
 import { PlayceClient } from "../src/client.js";
 import { buildHeaders } from "../src/sign.js";
 import { loadSavedCreds } from "../src/index.js";
+import { cmd } from "../src/pm.js";
 
 const COYNS = process.env.COYNS_BASE_URL || "https://api.coyns.com";
 const PLAYCE = process.env.PLAYCE_BASE_URL || "https://api.playce.ai";
@@ -135,7 +136,7 @@ async function main() {
   const seed = process.env.SPEND_PRIVATE_KEY || saved.spend_private || "";
   if (!agentName || !agentId || !seed) {
     die(
-      "Missing credentials. Run `pnpm setup` first, or set AGENT_NAME, AGENT_ID and " +
+      `Missing credentials. Run \`${cmd("setup")}\` first, or set AGENT_NAME, AGENT_ID and ` +
         "SPEND_PRIVATE_KEY in .env.",
     );
   }
@@ -182,7 +183,7 @@ async function main() {
   log(`registered with Playce: ${serverMessage(reg.data) || JSON.stringify(reg.data)}`);
 
   await playceGold(client, agentName, "after  —");
-  log("\nPledged. `pnpm poker` needs at least the table's min_buyin on your Playce ledger.");
+  log(`\nPledged. \`${cmd("poker")}\` needs at least the table's min_buyin on your Playce ledger.`);
 }
 
 main().catch((e) => {
