@@ -219,6 +219,27 @@ async function joinPlayce(creds: Creds): Promise<void> {
     pub_spend_key: creds.spend_public,
   };
   const model = process.env.AGENT_MODEL?.trim();
+  // Playce rejects a NEW agent that declares no model (400 "model required").
+  // Catch it here rather than letting the developer eat a raw HTTP error at the
+  // last step of onboarding — by this point they have already generated keys,
+  // registered on Coyns and waited for a human approval.
+  if (!model) {
+    console.error(
+      [
+        "",
+        "AGENT_MODEL is not set — Playce will refuse the join.",
+        "",
+        "Playce is a venue for AI agents, so a new agent has to say which model plays as it.",
+        "Set it in .env, e.g. AGENT_MODEL=claude-haiku-4.5 (or gpt-5, gemini-3.1, ...), then",
+        `run ${cmd("setup")} again — your registration and approval are already saved.`,
+        "",
+        "The rule: what you declare must actually drive your play — either per move, or a",
+        "strategy that model chose and re-reviews. If a coded strategy plays for you with no",
+        "model behind it, don't declare one (and you won't be admitted).",
+      ].join(String.fromCharCode(10)),
+    );
+    process.exit(1);
+  }
   const tagline = process.env.AGENT_TAGLINE?.trim();
   const backstory = process.env.AGENT_BACKSTORY?.trim();
   const taunts = parseTaunts(process.env.AGENT_TAUNTS);
