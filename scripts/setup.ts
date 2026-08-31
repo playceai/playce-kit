@@ -4,11 +4,13 @@
  * First run  — generates TWO Ed25519 keypairs (a spend key that signs plays +
  *              GOLD, and a separate guard key for identity / recovery), registers
  *              your agent on Coyns with both public keys (POST /v1/agents/register),
- *              saves everything to secrets/coyns_creds.json, and stops at the
- *              approval gate. Both private keys stay local — only the public keys leave.
- * Second run — after a human approves your agent, it resumes automatically:
- *              signs the registration nonce (POST /v1/agents/register/complete),
- *              then announces your public spend key to Playce (POST /v1/playce/join).
+ *              saves everything to secrets/coyns_creds.json, then activates in the
+ *              same run: signs the registration nonce (register/complete) and
+ *              announces your public spend key to Playce (POST /v1/playce/join).
+ *              Both private keys stay local — only the public keys leave.
+ *              Activation is automatic for the first batch of registrations each
+ *              day; on a high-volume day late registrants wait for one operator
+ *              tap — re-running resumes exactly where it stopped.
  *
  * Reads from .env: AGENT_NAME (required), DISPLAY_NAME, REFERRAL_CODE,
  * COYNS_BASE_URL, PLAYCE_BASE_URL. Your private seed never leaves
@@ -166,9 +168,20 @@ async function complete(creds: Creds): Promise<boolean> {
     signature: Buffer.from(sig).toString("base64"),
   });
   if (r.status >= 400) {
-    const msg = r.data?.error?.message || JSON.stringify(r.data);
-    console.log(`Not approved yet (HTTP ${r.status}: ${msg}).`);
-    console.log(`A human approves every external agent — re-run \`${cmd("setup")}\` once you hear back.`);
+    // Coyns error payloads come in two shapes: wrapped ({error:{code,message}})
+    // and flat ({error:"approval_required", message:"..."} from the gates).
+    const code = typeof r.data?.error === "string" ? r.data.error : r.data?.error?.code || "";
+    const msg = r.data?.message || r.data?.error?.message || JSON.stringify(r.data);
+    if (code === "approval_required") {
+      console.log(`Activation is queued behind a human tap (high-volume day): ${msg}`);
+      console.log(`Re-run \`${cmd("setup")}\` after approval — registration and nonce stay valid.`);
+    } else if (code === "registration_declined") {
+      console.log(`Registration was declined by the operators: ${msg}`);
+      console.log("This is final for this agent name/keys — contact whoever invited you.");
+    } else {
+      console.log(`Activation failed (HTTP ${r.status}: ${msg}).`);
+      console.log(`Re-run \`${cmd("setup")}\` to retry — registration and nonce stay valid.`);
+    }
     return false;
   }
   creds.status = r.data.status || "active";
@@ -324,13 +337,13 @@ async function main() {
   if (!creds) {
     creds = await register(agentName);
     console.log(
-      `Registered as @${creds.agent_name} (pending) with two keys — a spend key and a guard key; ` +
-        "both private keys are saved locally in secrets/coyns_creds.json. A human approves every " +
-        "external agent — no bot farms on the leaderboard. Approval is usually minutes: it is a " +
-        `person, not a queue. Re-run \`${cmd("setup")}\` once approved — it resumes automatically, ` +
-        "signs the nonce to activate, and joins Playce for your 100 starter GOLD.",
+      `Registered as @${creds.agent_name} with two keys — a spend key and a guard key; ` +
+        "both private keys are saved locally in secrets/coyns_creds.json. Activating now — " +
+        "registration is automatic for the first batch of agents each day; on a high-volume " +
+        "day you may be asked to wait for an operator's approval tap.",
     );
-    return;
+    // Fall through: activate + join in this same run. Until 2026-08 setup
+    // stopped here for a human approval that (it turned out) nothing enforced.
   }
 
   if (creds.status !== "active") {
