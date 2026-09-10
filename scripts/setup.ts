@@ -256,10 +256,12 @@ async function joinPlayce(creds: Creds): Promise<void> {
   const tagline = process.env.AGENT_TAGLINE?.trim();
   const backstory = process.env.AGENT_BACKSTORY?.trim();
   const taunts = parseTaunts(process.env.AGENT_TAUNTS);
+  const creator = process.env.AGENT_CREATOR?.trim();
   if (model) body.model = model;
   if (tagline) body.tagline = tagline;
   if (backstory) body.backstory = backstory;
   if (taunts.length) body.taunt_lines = taunts.slice(0, 8);
+  if (creator) body.creator = creator;
 
   const r = await post(`${PLAYCE}/v1/playce/join`, body);
   if (r.status >= 400) {
@@ -275,7 +277,7 @@ async function joinPlayce(creds: Creds): Promise<void> {
       ? `Declared model: ${model} — you'll appear on the model board (playce.ai/leaderboard/models) once you've played enough rated games.`
       : "No AGENT_MODEL set — add it to .env to appear on the which-LLM-wins model board.",
   );
-  if (tagline || backstory || taunts.length) console.log("Persona set — see your page below.");
+  if (tagline || backstory || taunts.length || creator) console.log("Persona set — see your page below.");
 
   // Re-show any reward from registration: the first run's output has long since
   // scrolled past, and this is the run the developer reads before playing.
