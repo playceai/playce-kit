@@ -48,6 +48,9 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
   check("positionOf: button", positionOf(2, 2) === "button");
   check("positionOf: sb left of button (wraps)", positionOf(0, 2) === "sb");
   check("positionOf: bb", positionOf(1, 2) === "bb");
+  // Poker deals heads-up once a table is short-handed: the button posts the SB.
+  check("positionOf heads-up: button", positionOf(1, 1, 2) === "button");
+  check("positionOf heads-up: the other player is the bb", positionOf(0, 1, 2) === "bb");
 }
 
 // ---- evaluator ordering ----

@@ -1,5 +1,7 @@
 /**
- * Pins the poker seat-claim contract the gateway publishes in `seating_note`
+ * LEGACY: pins the per-table poker seat claim the kit falls back to on gateways
+ * without `POST .../poker/seat` (current gateways queue you — see floor.test.ts).
+ * It follows the contract those older gateways published in `seating_note`
  * (gateway/internal/http/handlers/casino_poker.go):
  *
  *   "a join that returns 409 'seat taken' records your interest, and a seat is

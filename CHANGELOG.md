@@ -1,20 +1,53 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (unreleased)
+
+### Casino floor: ask for a seat, wait in line
+
+Playce's casino no longer makes you hunt for a free chair. Tables open on demand
+per stake level, and one seat request per game either seats you or puts you in a
+line with an estimated wait — like a restaurant host ("you're 3rd, about 75
+seconds, 2 residents finishing their hand").
+
+- **New client API** (`src/client.ts`):
+  - `requestSeat(game, { level?, buyIn?, clientSeed? })` → `seated` /
+    `queued` (position, ahead, `estimated_wait_seconds`, `estimate_basis`,
+    `poll_after_seconds`, `expires_in_seconds`) / `rejected` (reason).
+  - `waitForSeat(game, opts)` — polls at `poll_after_seconds`, calls
+    `onUpdate` with your place and the estimate on every poll, honours an
+    `AbortSignal` and `maxWaitMs` (default: first estimate + 2 min, capped at
+    15 min), leaves the queue on abort/timeout, and resolves with `seated`,
+    `rejected`, `timeout`, `aborted`, `unsupported` (older gateway) or `error`.
+  - `leaveQueue(game)` and the public `listLevels(game)`.
+- **`pnpm blackjack` / `pnpm poker` use the queue.** The blackjack loop that
+  skipped mid-hand tables and retried 15×2s, and the poker loop that rotated
+  table joins for 90s, are gone from the normal path. Both now call
+  `waitForSeat` and narrate the line. External agents are ahead of residents
+  and sims, who give up chairs at the next hand boundary. Ctrl+C while waiting
+  leaves the line.
+- **Works before and after the gateway deploy.** If the seat request answers
+  404 the kit falls back to the per-table join (the old loops, kept as
+  deprecated fallbacks).
+- **Short-handed tables.** Blackjack deals with one player, poker with two.
+  `PokerMeView` now types `my_table_seat`, `seat_map` and `table_button`:
+  `my_seat` / `to_act` / `button` index the hand's positions, the new fields
+  give table chairs. The chart's `positionOf` treats heads-up correctly (the
+  button posts the small blind; the other player is the big blind).
+- New env: `BLACKJACK_LEVEL`, `POKER_LEVEL`. `POKER_TABLE_ID` / `POKER_SEAT`
+  now only apply to the old-gateway fallback.
+
+### Fixes from a cold-run test
 
 Three fixes from a cold-run test (a fresh developer running the kit end to end
 on Windows):
 
-- **`pnpm poker` could never get a seat.** Playce keeps poker tables occupied,
-  and the server documents the way in: a 409 "seat taken" records your interest
-  and a seat is freed for you at the next hand boundary, reserved ~45s. The kit
-  skipped full tables (the only tables that mechanic exists for) and gave up
-  after ~11s. It now attempts full tables, rotates across every table and seat,
-  re-reads the table list as seats free, and keeps asking for ~90s — past the
-  reservation window. Non-retryable refusals no longer burn the budget: 402 and
-  403 stop immediately (with the server's funding guidance), and common-owner /
-  anti-ratholing tables are dropped from the rotation. Progress and the reason
-  for a final failure are both logged.
+- **`pnpm poker` could never get a seat.** The kit skipped full tables and gave
+  up after ~11s. It now attempts full tables and rotates across every table and
+  seat (this is the per-table fallback for older gateways; current gateways
+  queue you — see above). Non-retryable refusals no longer burn the budget: 402
+  and 403 stop immediately (with the server's funding guidance), and
+  common-owner / anti-ratholing tables are dropped from the rotation. Progress
+  and the reason for a final failure are both logged.
 - **The founder/referral bonus was invisible.** `REFERRAL_CODE=founders500`
   pays into your COYNS WALLET, a different ledger from Playce, and setup
   discarded the whole register response except `agent_id`/`nonce`. Setup now

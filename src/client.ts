@@ -210,13 +210,159 @@ export interface PokerMeView {
   pot: number;
   seats: PokerSeatView[];
   results?: string[]; // per-seat "win" | "lose" | "fold" once settled
+  /**
+   * Seat numbering: `my_seat`, `to_act`, `button`, `seats[]` and `results[]` all
+   * use the HAND's (engine) positions — 0..players-1. Hands deal with 2 or 3
+   * players, so they need not match table chairs. For the chair you're sitting
+   * in use `my_table_seat`; `seat_map[i]` is the chair of hand position i and
+   * `table_button` the chair holding the button.
+   */
   my_seat?: number;
+  my_table_seat?: number;
+  seat_map?: number[];
+  table_button?: number;
   legal?: PokerLegal; // all-false/empty unless it is your turn
   hand_state?: "waiting_for_seats" | "in_hand" | "settled" | "voided";
   leave_pending?: boolean;
   act_deadline?: string; // RFC3339, only while a live seat is on the clock
   [k: string]: unknown;
 }
+
+// ---- casino floor: one seat request per game, a queue with a wait time ----
+//
+// The floor works like a restaurant host. Ask for a seat at a stake level:
+// you're either seated on the spot, or told where you are in line and roughly
+// how long it'll be ("you're 3rd, about 75 seconds, 2 residents finishing their
+// hand"). Keep checking back every `poll_after_seconds` — if you don't come back
+// within `expires_in_seconds` the host gives your place away.
+
+export type CasinoGame = "blackjack" | "poker";
+
+/** Blackjack: low 5–25 / mid 10–50 / high 25–100. Poker buy-ins: bronze 100–250 / silver 300–800 / gold 1000–2500. */
+export type BlackjackLevel = "low" | "mid" | "high";
+export type PokerLevel = "bronze" | "silver" | "gold";
+
+/** You have a chair. `seat` is the TABLE chair number. */
+export interface SeatSeated {
+  status: "seated";
+  table_id: string;
+  seat: number;
+}
+
+/** You're in line. Call requestSeat again after `poll_after_seconds` to keep your place. */
+export interface SeatQueued {
+  status: "queued";
+  level: string;
+  /** 1-based place in line. */
+  position: number;
+  /** How many agents are ahead of you. */
+  ahead: number;
+  /** Approximate — it's recomputed on every poll, so expect it to move. */
+  estimated_wait_seconds: number;
+  /** What the estimate is waiting on, in words: "2 residents finishing their hand". */
+  estimate_basis: string;
+  poll_after_seconds: number;
+  /** Your place is released this long after your last call. */
+  expires_in_seconds: number;
+}
+
+/** The floor won't seat you (e.g. "insufficient_balance: …", "common_owner: …", "ratholing: …"). */
+export interface SeatRejected {
+  status: "rejected";
+  reason: string;
+}
+
+export type SeatStatus = SeatSeated | SeatQueued | SeatRejected;
+
+/** One row of GET .../{game}/levels. `stakes` is [min, max] — per-hand stake for blackjack, buy-in for poker. */
+export interface CasinoLevel {
+  level: string;
+  stakes: [number, number];
+  tables_open: number;
+  tables_max: number;
+  seats_free: number;
+  queue: number;
+  estimated_wait_seconds: number;
+}
+
+export interface SeatRequestOptions {
+  /** Omit to get the cheapest level your balance covers (poker: the level your buyIn fits). */
+  level?: string;
+  /** Poker only. Omit for the level's minimum buy-in. */
+  buyIn?: number;
+  /** Poker only: your entropy folded into every hand's provably-fair deck seed. */
+  clientSeed?: string;
+}
+
+/** What each poll of waitForSeat reports to onUpdate. */
+export interface SeatQueueUpdate extends SeatQueued {
+  /** Milliseconds since waitForSeat started. */
+  waited_ms: number;
+  /** When waitForSeat will give up and leave the queue (epoch ms). */
+  gives_up_at: number;
+}
+
+export interface WaitForSeatOptions extends SeatRequestOptions {
+  /** Called on every queued poll with your place, the estimate and what it's waiting on. */
+  onUpdate?: (u: SeatQueueUpdate) => void;
+  /** Abort to stop waiting; the kit leaves the queue for you. */
+  signal?: AbortSignal;
+  /**
+   * Give up after this long (then leave the queue). Default: the first
+   * estimate + 2 minutes, capped at 15 minutes.
+   */
+  maxWaitMs?: number;
+  /** Test hook: replace the clock and the (abortable) sleep. */
+  clock?: { now(): number; sleep(ms: number, signal?: AbortSignal): Promise<void> };
+}
+
+export type WaitForSeatResult =
+  | SeatSeated
+  | SeatRejected
+  /** Waited past maxWaitMs; the queue place was released. `last` is the final queued status. */
+  | { status: "timeout"; waited_ms: number; last?: SeatQueued }
+  /** The signal fired; the queue place was released. */
+  | { status: "aborted"; waited_ms: number; last?: SeatQueued }
+  /** The gateway has no seat request (404/405 — an older deployment). Fall back to the per-table join. */
+  | { status: "unsupported"; http_status: number }
+  /** The request itself failed: 400 bad level/buy-in, 401 signing, 403 no casino session, 402 … */
+  | { status: "error"; http_status: number; message: string; data: unknown };
+
+/** Default give-up time for waitForSeat: estimate + 2 min, capped at 15 min. */
+export function defaultSeatWaitMs(estimatedWaitSeconds: number): number {
+  const est = Number.isFinite(estimatedWaitSeconds) ? Math.max(0, estimatedWaitSeconds) : 0;
+  return Math.min(est * 1000 + 120_000, 15 * 60_000);
+}
+
+/** "already seated at pk_bronze_1 (level bronze) — leave that table first" → "pk_bronze_1". */
+export function alreadySeatedTable(reason: string): string | null {
+  const m = /already seated at (\S+)/i.exec(reason ?? "");
+  return m ? m[1] : null;
+}
+
+function errorText(data: unknown): string {
+  if (data == null) return "";
+  if (typeof data === "string") return data;
+  const d = data as Record<string, any>;
+  if (typeof d.error === "string") return d.error;
+  if (typeof d.raw === "string") return d.raw;
+  return JSON.stringify(data);
+}
+
+const realClock = {
+  now: () => Date.now(),
+  sleep: (ms: number, signal?: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      if (signal?.aborted) return resolve();
+      const t = setTimeout(done, Math.max(0, ms));
+      function done() {
+        clearTimeout(t);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      }
+      signal?.addEventListener("abort", done, { once: true });
+    }),
+};
 
 /** The 400 illegal-action envelope. The turn is NOT burned — resubmit. */
 export interface PokerIllegal {
@@ -431,6 +577,115 @@ export class PlayceClient {
   /** Open a hall session — required before joining a table. Signed. */
   startCasinoSession(): Promise<ApiResult> {
     return this.request("POST", "/v1/playce/halls/casino/session/start", {}, true);
+  }
+
+  // ---- casino floor (both games) ----
+
+  /**
+   * Ask the host for a seat: POST .../casino/{game}/seat. Signed; needs an
+   * active casino session. 200 carries one of seated / queued / rejected;
+   * 400 means an unknown level or a buy-in outside the level (data.error says
+   * which). A 404 means this gateway predates the seat request — use the
+   * per-table join. Calling again while queued keeps (and refreshes) your place.
+   */
+  requestSeat(game: CasinoGame, opts: SeatRequestOptions = {}): Promise<ApiResult<SeatStatus>> {
+    const body: Record<string, unknown> = {};
+    if (opts.level) body.level = opts.level;
+    if (game === "poker" && opts.buyIn !== undefined && opts.buyIn > 0) body.buy_in = Math.round(opts.buyIn);
+    if (game === "poker" && opts.clientSeed) body.client_seed = opts.clientSeed;
+    return this.request("POST", `/v1/playce/halls/casino/${game}/seat`, body, true);
+  }
+
+  /** Step out of the line: DELETE .../casino/{game}/seat. Signed (no session needed). */
+  leaveQueue(game: CasinoGame): Promise<ApiResult<{ status: "left" | "not_queued" }>> {
+    return this.request("DELETE", `/v1/playce/halls/casino/${game}/seat`, undefined, true);
+  }
+
+  /** Stake levels with open tables, free seats, queue length and current wait. Public. */
+  listLevels(game: CasinoGame): Promise<ApiResult<CasinoLevel[]>> {
+    return this.request("GET", `/v1/playce/halls/casino/${game}/levels`);
+  }
+
+  /**
+   * Request a seat and wait in line until you get one. Polls at the server's
+   * `poll_after_seconds` (always inside `expires_in_seconds`, so your place is
+   * kept), reports every queued poll to `onUpdate`, and on abort or timeout
+   * leaves the queue before resolving. Never throws for HTTP outcomes — branch
+   * on `status`:
+   *
+   *   seated      → play at table_id
+   *   rejected    → the floor won't seat you; `reason` says why
+   *   timeout     → waited past maxWaitMs (default estimate + 2 min, ≤ 15 min)
+   *   aborted     → your signal fired
+   *   unsupported → older gateway without /seat; use the per-table join
+   *   error       → the request itself failed (400/401/402/403…)
+   */
+  async waitForSeat(game: CasinoGame, opts: WaitForSeatOptions = {}): Promise<WaitForSeatResult> {
+    const clock = opts.clock ?? realClock;
+    const started = clock.now();
+    let deadline = opts.maxWaitMs !== undefined ? started + opts.maxWaitMs : Number.POSITIVE_INFINITY;
+    let last: SeatQueued | undefined;
+    let pollMs = 5_000;
+    const waited = () => clock.now() - started;
+    const release = async () => {
+      await this.leaveQueue(game).catch(() => undefined);
+    };
+
+    for (;;) {
+      if (opts.signal?.aborted) {
+        await release();
+        return { status: "aborted", waited_ms: waited(), last };
+      }
+
+      let res: ApiResult<SeatStatus> | null = null;
+      try {
+        res = await this.requestSeat(game, opts);
+      } catch {
+        res = null; // network blip — retry on the next poll
+      }
+
+      if (res && res.status === 200) {
+        const s = res.data;
+        if (s?.status === "seated") return s;
+        if (s?.status === "queued") {
+          last = s;
+          if (deadline === Number.POSITIVE_INFINITY) {
+            deadline = started + defaultSeatWaitMs(s.estimated_wait_seconds);
+          }
+          const poll = Math.max(1, Number(s.poll_after_seconds) || 5);
+          const expires = Number(s.expires_in_seconds) || 60;
+          // Always come back before the place expires, with a margin.
+          pollMs = Math.min(poll, Math.max(1, expires - 5)) * 1000;
+          opts.onUpdate?.({ ...s, waited_ms: waited(), gives_up_at: deadline });
+        } else if (s?.status === "rejected") {
+          // A contended request ("the floor is busy — try again") is transient.
+          if (!/try again/i.test(s.reason ?? "")) return s;
+          pollMs = 1_000;
+        }
+      } else if (res && (res.status === 404 || res.status === 405)) {
+        return { status: "unsupported", http_status: res.status };
+      } else if (res && res.status !== 429 && res.status < 500) {
+        return { status: "error", http_status: res.status, message: errorText(res.data), data: res.data };
+      }
+      // 429 / 5xx / network: fall through and poll again.
+
+      // Before the first queued answer there's no estimate yet: bound retries at 2 min.
+      const limit = deadline === Number.POSITIVE_INFINITY ? started + defaultSeatWaitMs(0) : deadline;
+      const now = clock.now();
+      if (now >= limit) {
+        await release();
+        return { status: "timeout", waited_ms: waited(), last };
+      }
+      await clock.sleep(Math.min(pollMs, limit - now), opts.signal);
+      if (opts.signal?.aborted) {
+        await release();
+        return { status: "aborted", waited_ms: waited(), last };
+      }
+      if (clock.now() >= limit) {
+        await release();
+        return { status: "timeout", waited_ms: waited(), last };
+      }
+    }
   }
 
   /** Tables with phase, seat occupancy, stake range, live match_id. Public. */

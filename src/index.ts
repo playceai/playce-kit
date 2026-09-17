@@ -18,6 +18,9 @@ import {
   type PokerMeView,
   type PokerTable,
   type Reasoning,
+  type CasinoGame,
+  type SeatQueueUpdate,
+  alreadySeatedTable,
 } from "./client.js";
 import { publicKeyFromSeed } from "./sign.js";
 import { decide, type RpsRound } from "./decide.js";
@@ -305,6 +308,26 @@ async function playHand(client: PlayceClient, me: string, matchId: string): Prom
   return "timeout";
 }
 
+/**
+ * @deprecated Per-table seat claim for gateways that predate
+ * `POST /halls/casino/blackjack/seat`. The run loop only falls back to it when
+ * the seat request answers 404; use `client.waitForSeat("blackjack")`.
+ */
+export async function legacyBlackjackSeat(client: PlayceClient): Promise<string> {
+  for (let i = 0; i < 15; i++) {
+    const { tables = [] } = (await client.listBlackjackTables()).data ?? {};
+    for (const t of tables) {
+      if (t.in_play || t.phase === "playing" || t.phase === "dealing") continue;
+      for (let seat = 0; seat < t.max_seats; seat++) {
+        const r = await client.joinBlackjackTable(t.table_id, seat);
+        if (r.status === 200) return t.table_id;
+      }
+    }
+    await sleep(2000);
+  }
+  return "";
+}
+
 async function playBlackjack(client: PlayceClient, me: string, stake: number, hands: number): Promise<void> {
   // The hall has a minimum-balance entry rule — read it live, don't hardcode.
   const halls = await client.listHalls();
@@ -324,25 +347,25 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
     return;
   }
 
-  // Claim a seat at the first joinable table.
+  // Ask the floor for a seat and wait in line if the level is busy. Blackjack
+  // deals short-handed (1+ player), so a chair means cards next round.
+  const seating = await seatOnFloor(client, me, "blackjack", {
+    level: (process.env.BLACKJACK_LEVEL || "").trim() || undefined,
+  });
   let tableId = "";
-  for (let i = 0; i < 15 && !tableId; i++) {
-    const { tables = [] } = (await client.listBlackjackTables()).data ?? {};
-    for (const t of tables) {
-      if (t.in_play || t.phase === "playing" || t.phase === "dealing") continue;
-      for (let seat = 0; seat < t.max_seats && !tableId; seat++) {
-        const r = await client.joinBlackjackTable(t.table_id, seat);
-        if (r.status === 200) tableId = t.table_id;
-      }
-      if (tableId) break;
+  if (seating === "unsupported") {
+    log("this gateway has no seat request yet — using the per-table join");
+    tableId = await legacyBlackjackSeat(client);
+    if (!tableId) {
+      log("no open seat found — try again later");
+      return;
     }
-    if (!tableId) await sleep(2000);
+    log(`seated at ${tableId}`);
+  } else if (seating) {
+    tableId = seating.tableId;
+  } else {
+    return; // seatOnFloor already said why
   }
-  if (!tableId) {
-    log("no open seat found — try again later");
-    return;
-  }
-  log(`seated at ${tableId}`);
 
   let played = 0;
   let lastMatch = "";
@@ -381,9 +404,111 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
   log(`done: ${played} hands`);
 }
 
-// ---- poker seating ----
+// ---- casino floor seating (both games) ----
+
+function ordinal(n: number): string {
+  const v = n % 100;
+  const suf = v >= 11 && v <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
+  return `${n}${suf}`;
+}
+
+/** "about 75 seconds" / "about 3 minutes" / "any moment now". Exported for tests. */
+export function describeWait(seconds: number): string {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s <= 5) return "any moment now";
+  if (s < 120) return `about ${s} seconds`;
+  return `about ${Math.round(s / 60)} minutes`;
+}
+
+/**
+ * A queue update in host-speak:
+ * "you're 3rd in line for low — about 75 seconds (2 residents finishing their hand)".
+ */
+export function describeQueue(u: {
+  position: number;
+  level: string;
+  estimated_wait_seconds: number;
+  estimate_basis?: string;
+}): string {
+  const basis = u.estimate_basis ? ` (${u.estimate_basis})` : "";
+  return `you're ${ordinal(u.position)} in line for ${u.level} — ${describeWait(u.estimated_wait_seconds)}${basis}`;
+}
+
+/**
+ * Get a chair through the casino floor: request a seat, wait in line (polling at
+ * the server's cadence and narrating each update), resolve with the table.
+ * Returns "unsupported" on a gateway without the seat request so the caller can
+ * use the old per-table join; null (having logged why) when there's no seat.
+ * Ctrl+C while queued leaves the line on the way out.
+ */
+async function seatOnFloor(
+  client: PlayceClient,
+  me: string,
+  game: CasinoGame,
+  opts: { level?: string; buyIn?: number; clientSeed?: string },
+): Promise<{ tableId: string } | "unsupported" | null> {
+  const ctrl = new AbortController();
+  const onSigint = () => ctrl.abort();
+  process.once("SIGINT", onSigint);
+  try {
+    for (let sessionRetries = 0; ; sessionRetries++) {
+      const res = await client.waitForSeat(game, {
+        ...opts,
+        signal: ctrl.signal,
+        onUpdate: (u: SeatQueueUpdate) =>
+          log(`${describeQueue(u)} — checking back in ${u.poll_after_seconds}s`),
+      });
+      switch (res.status) {
+        case "seated":
+          log(`seated at ${res.table_id}, chair ${res.seat}`);
+          return { tableId: res.table_id };
+        case "unsupported":
+          return "unsupported";
+        case "rejected": {
+          const already = alreadySeatedTable(res.reason);
+          if (already) {
+            log(`already seated at ${already} — playing on`);
+            return { tableId: already };
+          }
+          log(`the floor won't seat you: ${res.reason}`);
+          if (/insufficient_balance/i.test(res.reason)) {
+            const status = await client.getStatus(me).catch(() => null);
+            logFundingHelp(status?.data);
+          }
+          return null;
+        }
+        case "timeout":
+          log(
+            `gave up after ${Math.round(res.waited_ms / 1000)}s in line and left the queue` +
+              (res.last ? ` (last: ${ordinal(res.last.position)}, ${describeWait(res.last.estimated_wait_seconds)})` : "") +
+              ". Estimates are approximate — run again, or try a quieter level (see client.listLevels).",
+          );
+          return null;
+        case "aborted":
+          log("stopped waiting — left the queue");
+          return null;
+        case "error":
+          if (res.http_status === 403 && /session/i.test(res.message) && sessionRetries === 0) {
+            // A long wait can outlast the hall session: open a fresh one and get back in line.
+            const sess = await client.startCasinoSession();
+            if (sess.status === 200) continue;
+          }
+          log(`seat request failed: HTTP ${res.http_status} ${res.message}`);
+          if (res.http_status === 402) logFundingHelp(res.data);
+          return null;
+      }
+    }
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+  }
+}
+
+// ---- legacy poker seating (gateways without the seat request) ----
 
 /*
+ * @deprecated Everything in this block is the fallback for gateways that answer
+ * 404 to `POST /halls/casino/poker/seat`. Current gateways queue you instead.
+ *
  * A 409 from joinPokerTable is the documented WAY IN, not a wall. The tables
  * endpoint publishes the contract itself in `seating_note`:
  *
@@ -490,8 +615,9 @@ export function classifySeatClaim(res: ApiResult): { verdict: SeatVerdict; messa
 }
 
 /**
- * Keep asking until we have a seat or the budget runs out. Returns the table id,
- * or "" (having logged WHY, plus the server's last message) on failure.
+ * @deprecated Legacy fallback for gateways without the seat request — use
+ * `client.waitForSeat("poker")`. Keeps asking until we have a seat or the budget
+ * runs out. Returns the table id, or "" (having logged WHY) on failure.
  */
 async function claimPokerSeat(
   client: PlayceClient,
@@ -689,6 +815,8 @@ async function playPokerHand(client: PlayceClient, matchId: string): Promise<num
       continue;
     }
     const view = r.data;
+    // my_seat indexes this hand's seats/results/to_act (hand positions);
+    // my_table_seat is the chair you sit in.
     const seat = view.my_seat ?? -1;
     const me = seat >= 0 ? view.seats?.[seat] : undefined;
     if (me && startTotal === null) startTotal = me.stack + me.committed;
@@ -696,7 +824,8 @@ async function playPokerHand(client: PlayceClient, matchId: string): Promise<num
     if (view.hand_state === "settled" || view.hand_state === "voided" || view.phase === "settled") {
       const result = seat >= 0 ? view.results?.[seat] : undefined;
       const delta = me && startTotal !== null ? me.stack - startTotal : 0;
-      log(`hand ${matchId} ${view.hand_state ?? "settled"}: ${result ?? "-"} | delta ${delta >= 0 ? "+" : ""}${delta}`);
+      const chair = view.my_table_seat !== undefined ? ` (chair ${view.my_table_seat})` : "";
+      log(`hand ${matchId}${chair} ${view.hand_state ?? "settled"}: ${result ?? "-"} | delta ${delta >= 0 ? "+" : ""}${delta}`);
       return delta;
     }
 
@@ -724,20 +853,31 @@ async function playPoker(client: PlayceClient, me: string, hands: number): Promi
     return;
   }
 
-  // Claim a seat; buy in (GOLD is debited NOW and escrowed as stack). Full
-  // tables are attempted on purpose — see the SEAT_CLAIM_* block above.
-  const tableId = await claimPokerSeat(client, me, {
-    wantTable: (process.env.POKER_TABLE_ID || "").trim(),
-    // `POKER_SEAT=` (present but blank — how .env.example ships it) must mean
-    // "any seat", not Number("") === 0, which would pin us to seat 0 and undo
-    // the whole rotation.
-    wantSeat: seatFromEnv(process.env.POKER_SEAT),
-    clientSeed: process.env.POKER_CLIENT_SEED || undefined,
-    buyInEnv: process.env.POKER_BUYIN,
+  // Ask the floor for a seat, waiting in line if the level is busy. The buy-in
+  // is debited when you're SEATED (not while you queue) and escrowed as stack.
+  const buyInRaw = Number(process.env.POKER_BUYIN);
+  const clientSeed = process.env.POKER_CLIENT_SEED || undefined;
+  const seating = await seatOnFloor(client, me, "poker", {
+    level: (process.env.POKER_LEVEL || "").trim() || undefined,
+    buyIn: Number.isFinite(buyInRaw) && buyInRaw > 0 ? buyInRaw : undefined,
+    clientSeed,
   });
-  if (!tableId) return; // claimPokerSeat already logged why
+  let tableId = "";
+  if (seating === "unsupported") {
+    log("this gateway has no seat request yet — using the per-table join");
+    tableId = await claimPokerSeat(client, me, {
+      wantTable: (process.env.POKER_TABLE_ID || "").trim(),
+      // `POKER_SEAT=` (present but blank) must mean "any seat", not Number("") === 0.
+      wantSeat: seatFromEnv(process.env.POKER_SEAT),
+      clientSeed,
+      buyInEnv: process.env.POKER_BUYIN,
+    });
+  } else if (seating) {
+    tableId = seating.tableId;
+  }
+  if (!tableId) return; // the seating path already logged why
 
-  // Hands deal automatically once 3 funded seats fill; follow match_ids.
+  // Hands deal automatically once 2+ funded seats are filled; follow match_ids.
   let played = 0;
   let total = 0;
   let lastMatch = "";

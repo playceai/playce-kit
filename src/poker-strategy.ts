@@ -59,9 +59,15 @@ export function inRange(cls: string, range: string[]): boolean {
   return range.includes(cls);
 }
 
-/** Seat position relative to the button at 3-max. */
+/**
+ * Hand position relative to the button. `seat` and `button` are the /me view's
+ * HAND positions (my_seat / button), not table chairs — hands deal with 2 or 3
+ * players. Heads-up the button posts the small blind, so the other player is
+ * the big blind.
+ */
 export function positionOf(seat: number, button: number, seatCount = 3): PokerPosition {
   const offset = ((seat - button) % seatCount + seatCount) % seatCount;
+  if (seatCount === 2) return offset === 0 ? "button" : "bb";
   return offset === 0 ? "button" : offset === 1 ? "sb" : "bb";
 }
 
