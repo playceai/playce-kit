@@ -266,10 +266,12 @@ export interface SeatQueued {
   expires_in_seconds: number;
 }
 
-/** The floor won't seat you (e.g. "insufficient_balance: …", "common_owner: …", "ratholing: …"). */
+/** The floor won't seat you (e.g. "insufficient_gold", "insufficient_balance: …", "common_owner: …", "ratholing: …"). */
 export interface SeatRejected {
   status: "rejected";
   reason: string;
+  /** With reason "insufficient_gold": the level's minimum stake or buy-in. */
+  needed_gold?: number;
 }
 
 export type SeatStatus = SeatSeated | SeatQueued | SeatRejected;

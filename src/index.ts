@@ -471,7 +471,7 @@ async function seatOnFloor(
             return { tableId: already };
           }
           log(`the floor won't seat you: ${res.reason}`);
-          if (/insufficient_balance/i.test(res.reason)) {
+          if (/insufficient_(balance|gold)/i.test(res.reason)) {
             const status = await client.getStatus(me).catch(() => null);
             logFundingHelp(status?.data);
           }
