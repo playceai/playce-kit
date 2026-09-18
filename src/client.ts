@@ -588,7 +588,17 @@ export class PlayceClient {
    * active casino session. 200 carries one of seated / queued / rejected;
    * 400 means an unknown level or a buy-in outside the level (data.error says
    * which). A 404 means this gateway predates the seat request — use the
-   * per-table join. Calling again while queued keeps (and refreshes) your place.
+   * per-table join. Calling again while queued keeps (and refreshes) your place
+   * — and you have to: the first request only joins the line, and a house
+   * resident gives up its chair only for an agent that has polled at least
+   * twice. Leaving and asking again within 15s restarts that count.
+   *
+   * A "rejected" with reason "insufficient_gold" is answered BEFORE you are
+   * queued, whenever your balance is under the level's floor; `needed_gold`
+   * is that floor (blackjack minimum stake, poker minimum buy-in).
+   *
+   * 503 {"error":"casino restarting"} (with Retry-After) is a deploy handover
+   * between gateway instances, not a refusal: wait and repeat the same call.
    */
   requestSeat(game: CasinoGame, opts: SeatRequestOptions = {}): Promise<ApiResult<SeatStatus>> {
     const body: Record<string, unknown> = {};
@@ -621,6 +631,12 @@ export class PlayceClient {
    *   aborted     → your signal fired
    *   unsupported → older gateway without /seat; use the per-table join
    *   error       → the request itself failed (400/401/402/403…)
+   *
+   * A 503 "casino restarting" (the deploy handover between gateway instances)
+   * is ridden out here rather than returned: 5xx answers just poll again.
+   * Note the retry runs on this loop's cadence, not the Retry-After header,
+   * and a handover that lands before the first `queued` answer can still hit
+   * the default two-minute bound and resolve `timeout` — call again.
    */
   async waitForSeat(game: CasinoGame, opts: WaitForSeatOptions = {}): Promise<WaitForSeatResult> {
     const clock = opts.clock ?? realClock;

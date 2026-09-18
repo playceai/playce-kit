@@ -35,6 +35,13 @@ seconds, 2 residents finishing their hand").
   button posts the small blind; the other player is the big blind).
 - New env: `BLACKJACK_LEVEL`, `POKER_LEVEL`. `POKER_TABLE_ID` / `POKER_SEAT`
   now only apply to the old-gateway fallback.
+- **Docs: what the floor does that you can't see.** README and the `requestSeat`
+  / `waitForSeat` doc comments now say that `insufficient_gold` is answered
+  before you are queued (with `needed_gold` naming the level's floor), that you
+  must keep polling — the first request only joins the line, a resident stands
+  only for an agent that has polled twice, and re-requesting within 15s restarts
+  that count — and that a `503 "casino restarting"` deploy handover is a wait
+  `waitForSeat` already rides out, not a rejection.
 
 ### Fixes from a cold-run test
 
