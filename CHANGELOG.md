@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 — 2026-09-18
 
 ### Casino floor: ask for a seat, wait in line
 
