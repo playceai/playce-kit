@@ -351,8 +351,12 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
   // deals short-handed (1+ player), so a chair means cards next round.
   const seating = await seatOnFloor(client, me, "blackjack", {
     level: (process.env.BLACKJACK_LEVEL || "").trim() || undefined,
+    ...fastLaneFromEnv(),
   });
   let tableId = "";
+  // If the lane charged us, the commitment IS the first hand's bet: a first bet
+  // under it is refused outright, so honour what we committed, then bet normally.
+  let openingBet = typeof seating === "object" && seating ? seating.commitment : undefined;
   if (seating === "unsupported") {
     log("this gateway has no seat request yet — using the per-table join");
     tableId = await legacyBlackjackSeat(client);
@@ -387,10 +391,13 @@ async function playBlackjack(client: PlayceClient, me: string, stake: number, ha
       continue;
     }
     if (t.phase === "betting" && !betPlaced) {
-      const amount = Math.max(t.min_stake, Math.min(t.max_stake, stake));
+      const want = openingBet !== undefined ? Math.max(stake, openingBet) : stake;
+      const amount = Math.max(t.min_stake, Math.min(t.max_stake, want));
       const r = await client.placeBlackjackBet(tableId, amount);
       if (r.status === 200) {
         betPlaced = true;
+        if (openingBet !== undefined) log(`opening bet honours the ${openingBet} GOLD fast-lane commitment`);
+        openingBet = undefined;
         log(`staked ${amount} GOLD`);
       } else if (r.status === 402) {
         log(`not enough GOLD to cover the ${amount} stake — stopping`);
@@ -435,6 +442,18 @@ export function describeQueue(u: {
 }
 
 /**
+ * The fast lane, read from the environment: `FAST_LANE=true` (and optionally
+ * `COMMIT_GOLD=100`). OFF unless you switch it on — the kit never decides that
+ * playing sooner is worth GOLD, because that is the agent's call, not ours.
+ * Exported for tests.
+ */
+export function fastLaneFromEnv(env: NodeJS.ProcessEnv = process.env): { fastLane?: boolean; commitGold?: number } {
+  if (!/^(1|true|yes|on)$/i.test((env.FAST_LANE ?? "").trim())) return {};
+  const commit = Number(env.COMMIT_GOLD);
+  return { fastLane: true, commitGold: Number.isFinite(commit) && commit > 0 ? Math.round(commit) : undefined };
+}
+
+/**
  * Get a chair through the casino floor: request a seat, wait in line (polling at
  * the server's cadence and narrating each update), resolve with the table.
  * Returns "unsupported" on a gateway without the seat request so the caller can
@@ -445,8 +464,8 @@ async function seatOnFloor(
   client: PlayceClient,
   me: string,
   game: CasinoGame,
-  opts: { level?: string; buyIn?: number; clientSeed?: string },
-): Promise<{ tableId: string } | "unsupported" | null> {
+  opts: { level?: string; buyIn?: number; clientSeed?: string; fastLane?: boolean; commitGold?: number },
+): Promise<{ tableId: string; commitment?: number } | "unsupported" | null> {
   const ctrl = new AbortController();
   const onSigint = () => ctrl.abort();
   process.once("SIGINT", onSigint);
@@ -456,12 +475,28 @@ async function seatOnFloor(
         ...opts,
         signal: ctrl.signal,
         onUpdate: (u: SeatQueueUpdate) =>
-          log(`${describeQueue(u)} — checking back in ${u.poll_after_seconds}s`),
+          log(
+            `${describeQueue(u)} — checking back in ${u.poll_after_seconds}s` +
+              (u.fast_lane === undefined ? "" : ` | fast lane: ${u.fast_lane ? `on, ${u.fee} GOLD if it seats you` : "not applying"} (${u.fast_lane_reason})`),
+          ),
       });
       switch (res.status) {
-        case "seated":
+        case "seated": {
           log(`seated at ${res.table_id}, chair ${res.seat}`);
-          return { tableId: res.table_id };
+          // Say what the lane cost, every time. A charge is real GOLD gone and
+          // an opening stake you are now held to; silence about either is how
+          // an agent gets surprised by its own balance.
+          const charged = res.fast_lane_charged;
+          if (charged) {
+            log(
+              `seated through the fast lane — ${charged.fee} GOLD fee, ` +
+                `${charged.commitment} GOLD committed as your opening stake`,
+            );
+          } else if (res.fast_lane === false && res.fast_lane_reason) {
+            log(`fast lane not used, nothing charged: ${res.fast_lane_reason}`);
+          }
+          return { tableId: res.table_id, commitment: charged?.commitment };
+        }
         case "unsupported":
           return "unsupported";
         case "rejected": {
@@ -857,10 +892,14 @@ async function playPoker(client: PlayceClient, me: string, hands: number): Promi
   // is debited when you're SEATED (not while you queue) and escrowed as stack.
   const buyInRaw = Number(process.env.POKER_BUYIN);
   const clientSeed = process.env.POKER_CLIENT_SEED || undefined;
+  // With the fast lane on, COMMIT_GOLD *is* the buy-in — passing a different
+  // POKER_BUYIN too is refused (by the kit, before the request) rather than one
+  // amount silently winning.
   const seating = await seatOnFloor(client, me, "poker", {
     level: (process.env.POKER_LEVEL || "").trim() || undefined,
     buyIn: Number.isFinite(buyInRaw) && buyInRaw > 0 ? buyInRaw : undefined,
     clientSeed,
+    ...fastLaneFromEnv(),
   });
   let tableId = "";
   if (seating === "unsupported") {

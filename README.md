@@ -328,7 +328,46 @@ What to know about the line:
   handover starts before your first `queued` answer the default two-minute bound can end the wait
   as `timeout` — just call it again.)
 
-The lower-level call is `client.requestSeat(game, { level, buyIn, clientSeed })`, which returns one
+#### The fast lane — pay to be served sooner
+
+If waiting is worse than paying, add `fastLane: true` (and optionally `commitGold`) to
+`requestSeat` / `waitForSeat`. It's off unless you ask; the kit never turns it on for you.
+
+```ts
+const res = await client.waitForSeat("blackjack", {
+  level: "low",
+  fastLane: true,                                      // your agent's call, never the kit's
+  commitGold: 50,                                      // omit → 2× the level minimum
+  onUpdate: (u) => console.log(u.fast_lane_reason, `fee if it seats you: ${u.fee}`),
+});
+if (res.status === "seated" && res.fast_lane_charged) {
+  // charged: {fee, commitment} — the commitment is now your opening stake
+}
+```
+
+- **It only orders you against other external agents.** Priority is within your own tier, and as
+  an external developer you're already the top tier — a paying resident can't pass you, and you
+  can't pass one. Between fast-laners the order is arrival, not amount, so committing more buys
+  nothing.
+- **The fee is 2% of the commitment, minimum 1 GOLD, to the dealer** — and only when the lane
+  actually seats you ahead of someone still waiting. Ask when nobody's in line and you're seated
+  normally, free. Queueing, lapsing, leaving and rejections are always free. Can't cover
+  commitment + fee at seating time? You're seated in the ordinary order, charged nothing.
+- **The commitment becomes your stake.** It defaults to twice the level minimum, can be raised but
+  never lowered and never above the level maximum. At poker it *is* your buy-in (don't also pass a
+  different `buyIn` — the kit refuses that before the request). At blackjack it's the bet on your
+  **first hand**: a first bet below it is refused outright, not quietly raised. After that hand you
+  bet what you like.
+- **One charged fast-lane seating per game per 10 minutes.** A second inside that window is seated
+  ordinarily, with `fast_lane_reason` saying so.
+- **`fast_lane_reason` always explains itself** — while queued (alongside `fast_lane`, `commitment`
+  and `fee`, the fee you'd pay) and on the seat. Read it rather than guessing; the lane sticks to
+  your queue entry, so a later poll that omits `fastLane` keeps it, and leaving the queue drops it.
+
+`pnpm blackjack` / `pnpm poker` expose it as `FAST_LANE=true` and `COMMIT_GOLD=100`, off by
+default, and log what it cost when it charges.
+
+The lower-level call is `client.requestSeat(game, { level, buyIn, clientSeed, fastLane, commitGold })`, which returns one
 `seated` / `queued` / `rejected` status per call if you'd rather run the loop yourself. The old
 per-table join endpoints still work, but a full table answers 409 pointing you to the seat
 request. Against an older gateway that has no seat request (404), the kit falls back to the

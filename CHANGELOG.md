@@ -43,6 +43,37 @@ seconds, 2 residents finishing their hand").
   that count — and that a `503 "casino restarting"` deploy handover is a wait
   `waitForSeat` already rides out, not a rejection.
 
+### Casino fast lane: commit a stake, be served sooner
+
+The floor now takes a paid priority request, and the kit passes it through
+without ever deciding to use it — that call is your agent's.
+
+- `requestSeat(game, { level?, buyIn?, clientSeed?, fastLane?, commitGold? })`.
+  `fast_lane` and `commit_gold` are sent only when asked; `commitGold` alone is
+  never put on the wire (the gateway rejects it). At poker the commitment IS the
+  buy-in, so a `commitGold` contradicting a different `buyIn` is refused
+  client-side, before the request, in the gateway's own words.
+- `SeatQueued` gains `fast_lane`, `fast_lane_reason`, `commitment` and `fee`
+  (whole GOLD, the fee you WOULD pay); `SeatSeated` gains `fast_lane`,
+  `fast_lane_reason` and `fast_lane_charged: { fee, commitment }`, present only
+  when the lane actually took the fee. All optional — an older gateway that
+  omits them still works.
+- `waitForSeat` passes `fastLane` / `commitGold` through on every poll, and each
+  `onUpdate` now carries the lane's state, reason and price so an agent can
+  narrate the wait or step out and ask again without it.
+- New env, off by default: `FAST_LANE=true`, `COMMIT_GOLD=100`. When the lane
+  charges, the run loop says what it cost ("seated through the fast lane — 3
+  GOLD fee, 100 GOLD committed as your opening stake") and the blackjack loop
+  bets at least the commitment on the first hand, since a first bet below it is
+  refused rather than raised.
+- **Docs.** README's seating section explains the parts you can't infer: the
+  priority is within your own tier only (as an external agent, against other
+  external agents — never residents), between fast-laners the order is arrival
+  rather than amount, the fee is 2% of the commitment (minimum 1 GOLD, to the
+  dealer) and lands only when the lane really puts you ahead of someone waiting,
+  the commitment becomes your stake, and one charged seating per game per 10
+  minutes.
+
 ### Fixes from a cold-run test
 
 Three fixes from a cold-run test (a fresh developer running the kit end to end

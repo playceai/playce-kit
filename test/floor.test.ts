@@ -13,7 +13,7 @@ import {
   defaultSeatWaitMs,
   type SeatQueueUpdate,
 } from "../src/client.js";
-import { describeQueue, describeWait } from "../src/index.js";
+import { describeQueue, describeWait, fastLaneFromEnv } from "../src/index.js";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -213,6 +213,101 @@ const seated = { status: 200, body: { status: "seated", table_id: "bj_aurum_3", 
   mockFetch({ [`POST ${SEAT}`]: [{ status: 503, body: { error: "hiccup" } }, queued(1, 5), seated] });
   const r = await client().waitForSeat("blackjack", { clock: fakeClock() });
   check("5xx is retried, not surfaced", r.status === "seated");
+}
+
+// ---- fast lane: opt-in, priced, and never decided for you ----
+//
+// Rules pinned here (gateway internal/casino/floor_fastlane.go): the flag and
+// the commitment are sent only when asked, the fee is quoted while queued and
+// charged only when the lane actually seats you ahead of somebody, and a poker
+// buy-in that contradicts the commitment is refused before the round trip.
+{
+  const calls = mockFetch({ [`POST ${SEAT}`]: [seated] });
+  await client().requestSeat("blackjack", { fastLane: true, commitGold: 100 });
+  check("fastLane sends fast_lane + commit_gold", calls[0].body?.fast_lane === true && calls[0].body?.commit_gold === 100,
+    JSON.stringify(calls[0].body));
+}
+{
+  const calls = mockFetch({ [`POST ${SEAT}`]: [seated] });
+  await client().requestSeat("blackjack", { fastLane: true });
+  check("fastLane alone sends no commit_gold (the level default stands)",
+    calls[0].body?.fast_lane === true && calls[0].body?.commit_gold === undefined, JSON.stringify(calls[0].body));
+}
+{
+  const calls = mockFetch({ [`POST ${SEAT}`]: [seated] });
+  await client().requestSeat("blackjack", { commitGold: 100 });
+  check("commitGold without fastLane is never sent (it would be a 400)",
+    calls[0].body?.commit_gold === undefined && calls[0].body?.fast_lane === undefined, JSON.stringify(calls[0].body));
+}
+{
+  // Queued with the lane on: the agent must be able to see what it would cost.
+  const updates: SeatQueueUpdate[] = [];
+  mockFetch({
+    [`POST ${SEAT}`]: [
+      queued(1, 40, {
+        fast_lane: true, commitment: 50, fee: 1,
+        fast_lane_reason: "queued: you are ahead of the ordinary line in your tier; the fee is charged only when you are actually seated",
+      }),
+      { status: 200, body: { status: "seated", table_id: "bj_aurum_3", seat: 1, fast_lane: true, fast_lane_reason: "charged: you were seated ahead of agents of your own tier; the commitment is your opening stake", fast_lane_charged: { fee: 1, commitment: 50 } } },
+    ],
+  });
+  const r = await client().waitForSeat("blackjack", {
+    fastLane: true, clock: fakeClock(), onUpdate: (u) => updates.push(u),
+  });
+  check("queued update surfaces fast_lane, the reason and the fee",
+    updates.length === 1 && updates[0].fast_lane === true && updates[0].fee === 1 &&
+      updates[0].commitment === 50 && /charged only when/.test(updates[0].fast_lane_reason ?? ""),
+    JSON.stringify(updates[0]));
+  check("seated through the lane carries fast_lane_charged {fee, commitment}",
+    r.status === "seated" && r.fast_lane === true &&
+      r.fast_lane_charged?.fee === 1 && r.fast_lane_charged?.commitment === 50,
+    JSON.stringify(r));
+}
+{
+  // Asked for the lane, nobody was waiting: seated normally, nothing charged,
+  // and no commitment binds. fast_lane_charged must be absent, not zeroed.
+  mockFetch({
+    [`POST ${SEAT}`]: [{
+      status: 200,
+      body: {
+        status: "seated", table_id: "bj_aurum_1", seat: 0, fast_lane: false,
+        fast_lane_reason: "no_queue: nobody was waiting ahead of you at this level, so the fast lane was not used and nothing was charged",
+      },
+    }],
+  });
+  const r = await client().waitForSeat("blackjack", { fastLane: true, commitGold: 80, clock: fakeClock() });
+  check("no queue → seated free, nothing reported as charged",
+    r.status === "seated" && r.fast_lane === false && r.fast_lane_charged === undefined &&
+      /nothing was charged/.test(r.fast_lane_reason ?? ""), JSON.stringify(r));
+}
+{
+  // At poker the commitment IS the buy-in; two different numbers never reach
+  // the wire (the gateway would 400 in these same words).
+  const calls = mockFetch({ [`POST ${PSEAT}`]: [{ status: 200, body: { status: "seated", table_id: "pk_bronze_1", seat: 2 } }] });
+  const res = await client().requestSeat("poker", { fastLane: true, commitGold: 200, buyIn: 150 });
+  check("poker commitGold vs a different buyIn is refused client-side",
+    res.status === 400 && /commitment IS your buy-in/.test((res.data as any)?.error ?? ""), JSON.stringify(res.data));
+  check("…and no request was sent", calls.length === 0, `${calls.length} call(s)`);
+  const same = await client().requestSeat("poker", { fastLane: true, commitGold: 150, buyIn: 150 });
+  check("poker commitGold equal to buyIn is fine", same.status === 200 && calls.length === 1);
+}
+{
+  // An older gateway answers without any fast-lane fields; asking is harmless.
+  mockFetch({ [`POST ${SEAT}`]: [queued(2, 30), seated] });
+  const updates: SeatQueueUpdate[] = [];
+  const r = await client().waitForSeat("blackjack", { fastLane: true, clock: fakeClock(), onUpdate: (u) => updates.push(u) });
+  check("a gateway without the fast lane still seats you",
+    r.status === "seated" && r.fast_lane === undefined && r.fast_lane_charged === undefined &&
+      updates[0].fast_lane === undefined && updates[0].fee === undefined);
+}
+{
+  // FAST_LANE is OFF unless switched on: nothing here decides to spend GOLD.
+  check("fastLaneFromEnv defaults off", JSON.stringify(fastLaneFromEnv({} as NodeJS.ProcessEnv)) === "{}");
+  check("FAST_LANE=true, no COMMIT_GOLD → the level default commitment",
+    JSON.stringify(fastLaneFromEnv({ FAST_LANE: "true" } as NodeJS.ProcessEnv)) === '{"fastLane":true}');
+  check("FAST_LANE + COMMIT_GOLD passes the commitment through",
+    JSON.stringify(fastLaneFromEnv({ FAST_LANE: "1", COMMIT_GOLD: "120" } as NodeJS.ProcessEnv)) === '{"fastLane":true,"commitGold":120}');
+  check("COMMIT_GOLD alone stays off", JSON.stringify(fastLaneFromEnv({ COMMIT_GOLD: "120" } as NodeJS.ProcessEnv)) === "{}");
 }
 
 // ---- helpers ----
